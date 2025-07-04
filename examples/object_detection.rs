@@ -13,53 +13,59 @@ use std::fs::File;
 use std::io::{BufReader,BufRead};
 use std::collections::{VecDeque, BTreeMap};
 use std::thread;
+use std::cell::Cell;
+use std::sync::{Arc,Mutex,MutexGuard};
 
 pub struct QueueFPS<T>{
-  pub q: VecDeque<T>,
+  pub q: Cell<VecDeque<T>>,
+  pub counter: Cell<u32>,
+  pub tm: Cell<TickMeter>,
 }
 
-impl <T> QueueFPS<T> {
-    let mut counter: u32;
-    let tm: TickMeter = TickMeter::default();
-    //mutex
+impl <T: Clone> QueueFPS<T> {
 
-    pub fn new() -> Self {
-        counter = 0;
-        QueueFPS {q = VecDeque::new()};
+  pub fn new() -> Self {
+    QueueFPS {
+      q: Cell::new(VecDeque::new()),
+      counter: Cell::new(0),
+      tm: Cell::new(TickMeter::default().unwrap()),
     }
+  }
 
-    fn push(&self, entry: &T) -> () {
-        //std::lock_guard<std::mutex> lock(mutex);
-        self.q.push_back(empty);
+  fn push(&mut self, entry: &T) -> () {
+      let q = self.q.get_mut();
+      q.push_front(entry.clone());
+      let tm = self.tm.get_mut();
+      let count = self.counter.get();
+      self.counter.set(count + 1);
+      if self.counter.get() == 1
+      {
+          // Start counting from a second frame (warmup).
+          tm.reset();
+          tm.start();
+      }
+  }
 
-        counter += 1;
-        if (counter == 1)
-        {
-            // Start counting from a second frame (warmup).
-            tm.reset();
-            tm.start();
-        }
-    }
+  pub fn is_empty(&mut self) -> bool {
+    self.q.get_mut().is_empty()
+  }
   
-    pub fn get(&self) -> T{
-        //std::lock_guard<std::mutex> lock(mutex);
-        let entry: T= self.q.front();
-        seld.q.pop();
-        entry
-    }
+  pub fn get(&mut self) -> T {
+      self.q.get_mut().pop_front().unwrap()
+  }
 
-    pub fn getFPS(&self) -> f32 {
-        tm.stop();
-        let fps: f64  = counter / tm.getTimeSec();
-        tm.start();
-        fps as f32
-    }
+  pub fn getFPS(&mut self) -> f32 {
+      let tm = self.tm.get_mut();
+      tm.stop();
+      let count = self.counter.get();
+      let fps: f64  = count  as f64 / tm.get_time_sec().unwrap();
+      tm.start();
+      fps as f32
+  }
 
-    pub fn clear(&self) -> () {
-        //std::lock_guard<std::mutex> lock(mutex);
-        while (!self.q.empty())
-            self.q.pop();
-    }
+  pub fn clear(&mut self) -> () {
+    self.q.get_mut().clear();
+  }
 
 }
 
@@ -312,8 +318,9 @@ fn main() -> Result<()> {
   let nmsThreshold = parser.get_f64_def("nms")?  as f32;
   let scale = parser.get_f64_def("scale")? as f32;
   //: "104, 117, 123",
-  let mean: core::Scalar = parser.get_scalar("mean", true)?;
-  //let mean: core::Scalar = core::Scalar::new(mean);
+  //let mean: core::Scalar = parser.get_scalar("mean", true)?;
+  let _mean = parser.get_str_def("mean")?;
+  let mean: core::Scalar = core::Scalar::new(0., 0., 0., 0.);
   let swapRB = parser.get_bool_def("rgb")?;
   let inpWidth = parser.get_i32_def("width")?;
   let inpHeight = parser.get_i32_def("height")?;
@@ -414,28 +421,38 @@ fn main() -> Result<()> {
     //========================
     // threads version? probably should be default
     let process: bool = true;
-    let framesQueue: QueueFPS<Mat> = QueueFPS::new();
+    let fq: QueueFPS<Mat> = QueueFPS::new();
+    let framesQueue = Arc::new(Mutex::new(fq));
 
     // Frames capturing thread
+    let framesQueue1 = framesQueue.clone();
     let framesThread = thread::spawn(move || loop {
+        let framesQueue1 = framesQueue1.lock().unwrap();
         let frame: Mat;
         while process {
             if !cap.read(&mut frame)? {
               break;
             }
             if frame.size()?.width != 0 {
-              framesQueue.push(frame.clone());
+              framesQueue1.push(&frame);
             } else {
               break;
             }
         }
     });
 
-    let processedFramesQueue: QueueFPS<Mat> = QueueFPS::new();
-    let predictionsQueue: QueueFPS<Vec<Mat>> = QueueFPS::new();
+    let pfq: QueueFPS<Mat> = QueueFPS::new();
+    let processedFramesQueue = Arc::new(Mutex::new(pfq));
+    let pdq: QueueFPS<core::Vector<Mat>> = QueueFPS::new();
+    let predictionsQueue = Arc::new(Mutex::new(pdq));
 
     // Frames processing thread
+    let framesQueue2 = framesQueue.clone();
+    let processedFramesQueue2 = processedFramesQueue.clone();
+    let predictionsQueue2 = predictionsQueue.clone();
     let processingThread = thread::spawn(move || loop {
+        let framesQueue2 = framesQueue2.lock().unwrap();
+
         let futureOutputs: Vec<core::AsyncArray> = Vec::new();
         let blob: Mat;
         while process
@@ -443,23 +460,24 @@ fn main() -> Result<()> {
             // Get a next frame
             let frame: Mat = Mat::default();
             {
-                if !framesQueue.empty() {
-                    frame = framesQueue.get();
+                if !framesQueue2.is_empty() {
+                    frame = framesQueue2.get();
                     if asyncNumReq != 0 {
                         if futureOutputs.len() == asyncNumReq {
                           frame = Mat::default();
                         }
                     }
                     else {
-                      framesQueue.clear();  // Skip the rest of frames
+                      framesQueue2.clear();  // Skip the rest of frames
                     }
                 }
             }
 
             // Process the frame
+            let predictionsQueue2 = predictionsQueue2.lock().unwrap();
             if !frame.empty() {
                 preprocess(&mut frame, &mut net, Size::new(inpWidth, inpHeight), scale.into(), mean, swapRB);
-                processedFramesQueue.push(frame);
+                processedFramesQueue2.lock().unwrap().push(&frame);
 
                 if asyncNumReq != 0
                 {
@@ -469,7 +487,7 @@ fn main() -> Result<()> {
                 {
                     let outs: core::Vector<Mat> = Vec::new().into();
                     net.forward(&mut outs, &outNames);
-                    predictionsQueue.push(outs);
+                    predictionsQueue2.push(&outs);
                 }
             }
 
@@ -479,34 +497,37 @@ fn main() -> Result<()> {
                 futureOutputs.pop();
                 let out: Mat;
                 async_out.get(out);
-                predictionsQueue.push(out);
+                predictionsQueue2.push(&core::Vector::from(vec![out]));
             }
         }
     });
 
     // Postprocessing and rendering loop
     while highgui::wait_key_ex(1)? < 0 {
-        if predictionsQueue.empty() {
+        let predictionsQueue = predictionsQueue.lock().unwrap();
+        let framesQueue = framesQueue.lock().unwrap();
+        let processedFramesQueue = processedFramesQueue.lock().unwrap();
+         if predictionsQueue.is_empty() {
           continue;
         }
 
-        let outs:Vec<Mat> = predictionsQueue.get();
+        let outs:Vec<Mat> = predictionsQueue.get().into();
         let frame: Mat = processedFramesQueue.get();
 
-        postprocess(frame, outs, &net, backend, confThreshold as f32, &mut classes, nmsThreshold);
+        postprocess(&mut frame, &outs, &net, backend, confThreshold as f32, &mut classes, nmsThreshold);
 
-        if predictionsQueue.counter > 1
+        if predictionsQueue.counter.get() > 1
         {
             let label = format!("Camera: {:.2} FPS", framesQueue.getFPS());
-            imgproc::put_text_def(frame, &label, Point::new(0, 15), FONT_HERSHEY_SIMPLEX, 0.5, core::Scalar::new(0., 0., 255., 0.));
+            imgproc::put_text_def(&mut frame, &label, Point::new(0, 15), FONT_HERSHEY_SIMPLEX, 0.5, core::Scalar::new(0., 0., 255., 0.));
 
             let label = format!("Network: {:.2} FPS", predictionsQueue.getFPS());
-            imgproc::put_text_def(frame, &label, Point::new(0, 30), FONT_HERSHEY_SIMPLEX, 0.5, core::Scalar::new(0., 0., 255., 0.));
+            imgproc::put_text_def(&mut frame, &label, Point::new(0, 30), FONT_HERSHEY_SIMPLEX, 0.5, core::Scalar::new(0., 0., 255., 0.));
 
-            let label = format!("Skipped frames: {:?}", framesQueue.counter - predictionsQueue.counter);
-            imgproc::put_text_def(frame, &label, Point::new(0, 45), FONT_HERSHEY_SIMPLEX, 0.5, core::Scalar::new(0., 0., 255., 0.));
+            let label = format!("Skipped frames: {:?}", framesQueue.counter.get() - predictionsQueue.counter.get());
+            imgproc::put_text_def(&mut frame, &label, Point::new(0, 45), FONT_HERSHEY_SIMPLEX, 0.5, core::Scalar::new(0., 0., 255., 0.));
         }
-        highgui::imshow(kWinName, frame);
+        highgui::imshow(kWinName, &frame);
     }
 
     process = false;

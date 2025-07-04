@@ -323,11 +323,10 @@ fn main() -> Result<()> {
   let asyncNumReq = parser.get_i32_def("async")? as usize;
   let mut classes: Vec<String> = Vec::new();
 
-  type Callback = Box<(dyn FnMut(i32)+ Send + Sync + 'static)>;
-
-  let cb = |pos: i32| -> () { 
-    confThreshold = (pos as f64) * 0.01;
-  };
+  //type Callback = Box<(dyn FnMut(i32)+ Send + Sync + 'static)>;
+  // let cb = |pos: i32| -> () { 
+  //   confThreshold = (pos as f64) * 0.01;
+  // };
 
   if parser.has("model")? {
     let model = parser.get_str_def("model")?;
@@ -361,9 +360,15 @@ fn main() -> Result<()> {
     // Create a window
     const kWinName: &str = "Deep learning object detection in OpenCV";
     highgui::named_window(kWinName, highgui::WINDOW_NORMAL);
-    let initialConf: Option<&mut i32> = Some (&mut ((confThreshold as i32) * 100));
+    let mut th100: i32 = (confThreshold as i32) * 100;
+    let initialConf: Option<&mut i32> = Some(&mut th100);
 
-    highgui::create_trackbar("Confidence threshold, %", kWinName, initialConf, 99, Some(Box::new(cb)));
+    highgui::create_trackbar("Confidence threshold, %", 
+      kWinName, initialConf, 99, Some(Box::new({
+        move |pos| {
+          confThreshold = (pos as f64) * 0.01;
+        }
+      })));
 
     // Open a video file or an image file or a camera stream.
     let mut cap = videoio::VideoCapture::default()?;

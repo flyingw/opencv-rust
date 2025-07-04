@@ -43,8 +43,8 @@ impl <T: Clone> QueueFPS<T> {
       if self.counter.get() == 1
       {
           // Start counting from a second frame (warmup).
-          tm.reset();
-          tm.start();
+          let _ = tm.reset();
+          let _ = tm.start();
       }
   }
 
@@ -58,10 +58,10 @@ impl <T: Clone> QueueFPS<T> {
 
   pub fn getFPS(&mut self) -> f32 {
       let tm = self.tm.get_mut();
-      tm.stop();
+      let _ = tm.stop();
       let count = self.counter.get();
       let fps: f64  = count  as f64 / tm.get_time_sec().unwrap();
-      tm.start();
+      let _ = tm.start();
       fps as f32
   }
 
@@ -76,7 +76,7 @@ fn drawPred(label: &str, left: i32, mut top: i32, width: i32, height: i32, frame
     // Draw bounding box
     let rect = Rect2i::new(top, left, width, height);
 
-    imgproc::rectangle_def(frame, rect, (0., 255., 0.).into());
+    let _ = imgproc::rectangle_def(frame, rect, (0., 255., 0.).into());
 
     let mut baseLine: i32 = 0;
     let labelSize: core::Size = imgproc::get_text_size(label, FONT_HERSHEY_SIMPLEX, 0.5, 1, &mut baseLine)?;
@@ -86,7 +86,7 @@ fn drawPred(label: &str, left: i32, mut top: i32, width: i32, height: i32, frame
     let p1 = Point::new(left, top - labelSize.height);
     let p2 = Point::new(left + labelSize.width, top + baseLine);
 
-    imgproc::rectangle_points_def(frame, p1, p2, core::Scalar::all(255.));
+    let _ = imgproc::rectangle_points_def(frame, p1, p2, core::Scalar::all(255.));
 
     imgproc::put_text_def(frame, label, Point::new(left, top), FONT_HERSHEY_SIMPLEX, 0.5, core::Scalar::default())
 }
@@ -99,12 +99,12 @@ fn preprocess(frame: &mut Mat, net: &mut Net, mut inpSize: core::Size, scale: f6
     if inpSize.width <= 0 { inpSize.width = frame.cols();}
     if inpSize.height <= 0 { inpSize.height = frame.rows();}
     
-    opencv::dnn::blob_from_image_to(frame, blob, 1.0, inpSize, core::Scalar::default(), swapRB, false, CV_8U);
+    let _ = opencv::dnn::blob_from_image_to(frame, blob, 1.0, inpSize, core::Scalar::default(), swapRB, false, CV_8U);
 
     //blobFromImage(frame, blob, 1.0, inpSize, Scalar(), swapRB, false, CV_8U);
 
     // Run a model.
-    net.set_input(blob, "", scale, mean);
+    let _ = net.set_input(blob, "", scale, mean);
     
     let mut l = net.get_layer(0)?;
 
@@ -117,7 +117,7 @@ fn preprocess(frame: &mut Mat, net: &mut Net, mut inpSize: core::Size, scale: f6
         let x = &[inpSize.height as f32, inpSize.width as f32, 1.6];
         let imInfo: BoxedRef<Mat> = Mat::new_rows_cols_with_data(1, 3, x)?;
         
-        net.set_input(&imInfo, "im_info",  scale, mean);
+        let _ = net.set_input(&imInfo, "im_info",  scale, mean);
     }
 
     Ok(())
@@ -185,7 +185,7 @@ fn postprocess(frame: &mut Mat, outs: &Vec<Mat>, net: &Net, backend: i32, confTh
             let mut classIdPoint: Point = Point::default();
             let mut confidence = 0. as f64;
             let mut min = 0.;
-            min_max_loc(&scores, Some(&mut min), Some(&mut confidence), Some(&mut Point::new(0,0)), Some(&mut classIdPoint), &Mat::default());
+            let _ = min_max_loc(&scores, Some(&mut min), Some(&mut confidence), Some(&mut Point::new(0,0)), Some(&mut classIdPoint), &Mat::default());
 
             if confidence > confThreshold.into() {
               let centerX: i32 = (data[0] * frame.cols()) as i32;
@@ -237,7 +237,7 @@ fn postprocess(frame: &mut Mat, outs: &Vec<Mat>, net: &Net, backend: i32, confTh
           let nmsIndices: Vec<i32> = Vec::new();
           //nms_boxes_f64_def
   
-          opencv::dnn::nms_boxes_def(
+          let _ = opencv::dnn::nms_boxes_def(
               &Vector::from_slice(&localBoxes[..]), 
               &Vector::from_slice(&localConfidences[..]), 
               confThreshold as f32,
@@ -267,7 +267,7 @@ fn postprocess(frame: &mut Mat, outs: &Vec<Mat>, net: &Net, backend: i32, confTh
         label = classes[classId].clone() + ": " + &label;
       }
 
-      drawPred(label.as_str(), box0.x, box0.y, box0.width, box0.height,frame);
+      let _ = drawPred(label.as_str(), box0.x, box0.y, box0.width, box0.height,frame);
     }
 
     Ok(())

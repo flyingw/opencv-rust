@@ -353,17 +353,17 @@ fn main() -> Result<()> {
     // Load a model.
     let mut net: Net = dnn::read_net(&model, &config, &framework)?;
     let backend = parser.get_i32_def("backend")?;
-    net.set_preferable_backend(backend);
-    net.set_preferable_target(parser.get_i32_def("target")?);
+    let _ = net.set_preferable_backend(backend);
+    let _ = net.set_preferable_target(parser.get_i32_def("target")?);
     let outNames: core::Vector<String> = net.get_unconnected_out_layers_names()?;
 
     // Create a window
     const kWinName: &str = "Deep learning object detection in OpenCV";
-    highgui::named_window(kWinName, highgui::WINDOW_NORMAL);
+    let _ = highgui::named_window(kWinName, highgui::WINDOW_NORMAL);
     let mut th100: i32 = (confThreshold as i32) * 100;
     let initialConf: Option<&mut i32> = Some(&mut th100);
 
-    highgui::create_trackbar("Confidence threshold, %", 
+    let _ = highgui::create_trackbar("Confidence threshold, %", 
       kWinName, initialConf, 99, Some(Box::new({
         move |pos| {
           confThreshold = (pos as f64) * 0.01;
@@ -376,9 +376,9 @@ fn main() -> Result<()> {
     if parser.has("input")? {
         let file = parser.get_str_def("input")?;
         let x = core::find_file_or_keep_def(&file)?;
-        cap.open_file_def(&x);
+        let _ = cap.open_file_def(&x);
     } else {
-        cap.open_def(parser.get_i32_def("device")?);
+        let _ = cap.open_def(parser.get_i32_def("device")?);
     }
 
     let process: Arc<AtomicBool> = Arc::new(AtomicBool::new(true));
@@ -446,7 +446,7 @@ fn main() -> Result<()> {
             let mut predictionsQueue2 = predictionsQueue2.lock().unwrap();
             if !frame.empty() {
                 let mut ne = netB.lock().unwrap();
-                preprocess(&mut frame, &mut ne, Size::new(inpWidth, inpHeight), scale.into(), mean, swapRB);
+                let _ = preprocess(&mut frame, &mut ne, Size::new(inpWidth, inpHeight), scale.into(), mean, swapRB);
                 processedFramesQueue2.lock().unwrap().push(&frame);
 
                 if asyncNumReq != 0
@@ -456,7 +456,7 @@ fn main() -> Result<()> {
                 else
                 {
                     let mut outs: core::Vector<Mat> = Vec::new().into();
-                    ne.forward(&mut outs, &outNames);
+                    let _ = ne.forward(&mut outs, &outNames);
                     predictionsQueue2.push(&outs);
                 }
             }
@@ -466,7 +466,7 @@ fn main() -> Result<()> {
                 let async_out: core::AsyncArray = futureOutputs.pop_front().unwrap();
 
                 let mut out: Mat = Mat::default();
-                async_out.get(&mut out);
+                let _ = async_out.get(&mut out);
                 predictionsQueue2.push(&core::Vector::from(vec![out]));
             }
         }
@@ -486,25 +486,25 @@ fn main() -> Result<()> {
         let outs:Vec<Mat> = predictionsQueue.get().into();
         let mut frame: Mat = processedFramesQueue.get();
         let ne = netAA.lock().unwrap();
-        postprocess(&mut frame, &outs, &ne, backend, confThreshold as f32, &mut classes, nmsThreshold);
+        let _ = postprocess(&mut frame, &outs, &ne, backend, confThreshold as f32, &mut classes, nmsThreshold);
 
         if predictionsQueue.counter.get() > 1
         {
             let label = format!("Camera: {:.2} FPS", framesQueue.getFPS());
-            imgproc::put_text_def(&mut frame, &label, Point::new(0, 15), FONT_HERSHEY_SIMPLEX, 0.5, core::Scalar::new(0., 0., 255., 0.));
+            let _ = imgproc::put_text_def(&mut frame, &label, Point::new(0, 15), FONT_HERSHEY_SIMPLEX, 0.5, core::Scalar::new(0., 0., 255., 0.));
 
             let label = format!("Network: {:.2} FPS", predictionsQueue.getFPS());
-            imgproc::put_text_def(&mut frame, &label, Point::new(0, 30), FONT_HERSHEY_SIMPLEX, 0.5, core::Scalar::new(0., 0., 255., 0.));
+            let _ = imgproc::put_text_def(&mut frame, &label, Point::new(0, 30), FONT_HERSHEY_SIMPLEX, 0.5, core::Scalar::new(0., 0., 255., 0.));
 
             let label = format!("Skipped frames: {:?}", framesQueue.counter.get() - predictionsQueue.counter.get());
-            imgproc::put_text_def(&mut frame, &label, Point::new(0, 45), FONT_HERSHEY_SIMPLEX, 0.5, core::Scalar::new(0., 0., 255., 0.));
+            let _ = imgproc::put_text_def(&mut frame, &label, Point::new(0, 45), FONT_HERSHEY_SIMPLEX, 0.5, core::Scalar::new(0., 0., 255., 0.));
         }
-        highgui::imshow(kWinName, &frame);
+        let _ = highgui::imshow(kWinName, &frame);
     }
 
     process.store(false, Ordering::Relaxed);
-    framesThread.join();
-    processingThread.join();
+    let _ = framesThread.join();
+    let _ = processingThread.join();
 
     Ok(())
   } else {

@@ -3,7 +3,7 @@ use std::env;
 use opencv::core::{CommandLineParser, Point, Point2f, Rect, Rect2f, Rect2i, Size, StsBadArg, StsNotImplemented, StsError, TickMeter};
 //use opencv::objdetect::{FaceRecognizerSF, FaceRecognizerSF_DisType};
 use opencv::prelude::*;
-use opencv::{core, highgui, imgcodecs, imgproc, objdetect, videoio, Error, Result};
+use opencv::{core, highgui, imgproc, videoio, Error, Result};
 use opencv::core::{CV_8U, min_max_loc, Vector};
 use opencv::imgproc::{FONT_HERSHEY_SIMPLEX};
 use opencv::dnn::{Net,DNN_BACKEND_OPENCV};
@@ -14,7 +14,7 @@ use std::io::{BufReader,BufRead};
 use std::collections::{VecDeque, BTreeMap};
 use std::thread;
 use std::cell::Cell;
-use std::sync::{Arc,Mutex,MutexGuard};
+use std::sync::{Arc,Mutex};
 
 pub struct QueueFPS<T>{
   pub q: Cell<VecDeque<T>>,
@@ -420,7 +420,7 @@ fn main() -> Result<()> {
 
     //========================
     // threads version? probably should be default
-    let process: bool = true;
+    let mut process: bool = true;
     let fq: QueueFPS<Mat> = QueueFPS::new();
     let framesQueue = Arc::new(Mutex::new(fq));
 
@@ -430,10 +430,10 @@ fn main() -> Result<()> {
         let framesQueue1 = framesQueue1.lock().unwrap();
         let frame: Mat;
         while process {
-            if !cap.read(&mut frame)? {
+            if !cap.read(&mut frame).unwrap() {
               break;
             }
-            if frame.size()?.width != 0 {
+            if frame.size().unwrap().width != 0 {
               framesQueue1.push(&frame);
             } else {
               break;
@@ -453,7 +453,7 @@ fn main() -> Result<()> {
     let processingThread = thread::spawn(move || loop {
         let framesQueue2 = framesQueue2.lock().unwrap();
 
-        let futureOutputs: Vec<core::AsyncArray> = Vec::new();
+        let futureOutputs: VecDeque<core::AsyncArray> = VecDeque::new();
         let blob: Mat;
         while process
         {
@@ -481,7 +481,7 @@ fn main() -> Result<()> {
 
                 if asyncNumReq != 0
                 {
-                    futureOutputs.push(net.forward_async_def()?);
+                    futureOutputs.push_back(net.forward_async_def().unwrap());
                 }
                 else
                 {
@@ -492,11 +492,11 @@ fn main() -> Result<()> {
             }
 
             while !futureOutputs.is_empty() &&
-                   futureOutputs.into().front().wait_for(std::time::Duration::from_secs(0)) {
-                let async_out: core::AsyncArray = futureOutputs.into().front();
-                futureOutputs.pop();
+                   futureOutputs.front().unwrap().wait_for(0).unwrap() {
+                let async_out: &core::AsyncArray = futureOutputs.front().unwrap();
+                futureOutputs.pop_front();
                 let out: Mat;
-                async_out.get(out);
+                async_out.get(&mut out);
                 predictionsQueue2.push(&core::Vector::from(vec![out]));
             }
         }
@@ -505,7 +505,7 @@ fn main() -> Result<()> {
     // Postprocessing and rendering loop
     while highgui::wait_key_ex(1)? < 0 {
         let predictionsQueue = predictionsQueue.lock().unwrap();
-        let framesQueue = framesQueue.lock().unwrap();
+        let mut framesQueue = framesQueue.lock().unwrap();
         let processedFramesQueue = processedFramesQueue.lock().unwrap();
          if predictionsQueue.is_empty() {
           continue;

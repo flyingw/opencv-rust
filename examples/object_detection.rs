@@ -413,6 +413,9 @@ fn main() -> Result<()> {
     let processedFramesQueue2 = processedFramesQueue.clone();
     let predictionsQueue2 = predictionsQueue.clone();
     let processProcess = process.clone();
+
+    let netA = Arc::new(Mutex::new(net));
+    let netB = netA.clone();
     let processingThread = thread::spawn(move || loop {
         let mut framesQueue2 = framesQueue2.lock().unwrap();
         let mut futureOutputs: VecDeque<core::AsyncArray> = VecDeque::new();
@@ -437,17 +440,18 @@ fn main() -> Result<()> {
             // Process the frame
             let mut predictionsQueue2 = predictionsQueue2.lock().unwrap();
             if !frame.empty() {
-                preprocess(&mut frame, &mut net, Size::new(inpWidth, inpHeight), scale.into(), mean, swapRB);
+                let mut ne = netB.lock().unwrap();
+                preprocess(&mut frame, &mut ne, Size::new(inpWidth, inpHeight), scale.into(), mean, swapRB);
                 processedFramesQueue2.lock().unwrap().push(&frame);
 
                 if asyncNumReq != 0
                 {
-                    futureOutputs.push_back(net.forward_async_def().unwrap());
+                    futureOutputs.push_back(ne.forward_async_def().unwrap());
                 }
                 else
                 {
                     let mut outs: core::Vector<Mat> = Vec::new().into();
-                    net.forward(&mut outs, &outNames);
+                    ne.forward(&mut outs, &outNames);
                     predictionsQueue2.push(&outs);
                 }
             }
@@ -464,6 +468,8 @@ fn main() -> Result<()> {
     });
 
     // Postprocessing and rendering loop
+    
+    let netAA = netA.clone();
     while highgui::wait_key_ex(1)? < 0 {
         let mut predictionsQueue = predictionsQueue.lock().unwrap();
         let mut framesQueue = framesQueue.lock().unwrap();
@@ -474,8 +480,8 @@ fn main() -> Result<()> {
 
         let outs:Vec<Mat> = predictionsQueue.get().into();
         let mut frame: Mat = processedFramesQueue.get();
-
-        postprocess(&mut frame, &outs, &net, backend, confThreshold as f32, &mut classes, nmsThreshold);
+        let ne = netAA.lock().unwrap();
+        postprocess(&mut frame, &outs, &ne, backend, confThreshold as f32, &mut classes, nmsThreshold);
 
         if predictionsQueue.counter.get() > 1
         {

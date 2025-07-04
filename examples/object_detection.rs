@@ -1,9 +1,9 @@
 use std::env;
 
-use opencv::core::{CommandLineParser, Point, Point2f, Rect, Rect2f, Rect2i, Size, StsBadArg, StsNotImplemented, StsError, TickMeter};
+use opencv::core::{CommandLineParser, Point, Rect, Rect2i, Size, StsNotImplemented, StsError, TickMeter};
 //use opencv::objdetect::{FaceRecognizerSF, FaceRecognizerSF_DisType};
 use opencv::prelude::*;
-use opencv::{core, highgui, imgproc, videoio, Error, Result};
+use opencv::{core, dnn, highgui, imgproc, videoio, Error, Result};
 use opencv::core::{CV_8U, min_max_loc, Vector};
 use opencv::imgproc::{FONT_HERSHEY_SIMPLEX};
 use opencv::dnn::{Net,DNN_BACKEND_OPENCV};
@@ -15,6 +15,8 @@ use std::collections::{VecDeque, BTreeMap};
 use std::thread;
 use std::cell::Cell;
 use std::sync::{Arc,Mutex};
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
 pub struct QueueFPS<T>{
   pub q: Cell<VecDeque<T>>,
@@ -277,9 +279,7 @@ fn main() -> Result<()> {
   let parser = CommandLineParser::new(
     &args,
     concat!(
-      "{help  h           |            | Print this message}",
-      "{ @alias      | | An alias name of model to extract preprocessing parameters from models.yml file. }",
-      "{ zoo         | models.yml | An optional path to file with preprocessing parameters }",
+      "{help  h           |            | Print this message}",      
       "{ device      |  0 | camera device number. }",
       "{ input i     | | Path to input image or video file. Skip this argument to capture frames from a camera. }",
       "{ framework f | | Optional name of an origin framework of the model. Detect it automatically if it does not set. }",
@@ -309,11 +309,7 @@ fn main() -> Result<()> {
     parser.print_message()?;
     return Ok(());
   }
-  
-  //Use this script to run object detection deep learning networks using OpenCV
 
-  let modelName = parser.get_str_def("@alias")?;
-  let zooFile = parser.get_str_def("zoo")?;
   let mut confThreshold = parser.get_f64_def("thr")?;
   let nmsThreshold = parser.get_f64_def("nms")?  as f32;
   let scale = parser.get_f64_def("scale")? as f32;
@@ -334,14 +330,15 @@ fn main() -> Result<()> {
   };
 
   if parser.has("model")? {
-    let modelPath = core::find_file_def(&parser.get_str_def("model")?)?.as_str();
-    let configPath = core::find_file_def(&parser.get_str_def("config")?)?.as_str();
+    let model = parser.get_str_def("model")?;
+    let config = parser.get_str_def("config")?;
+    let framework = parser.get_str_def("framework")?;
 
     // Open file with classes names.
     if parser.has("classes")? {
         let file = parser.get_str_def("classes")?;
         
-        let css = match File::open(file) {
+        let css = match File::open(&file) {
           Ok(ifs) => {
             let reader = BufReader::new(ifs);
             for line in reader.lines().map_while(Result::ok) {
@@ -355,17 +352,16 @@ fn main() -> Result<()> {
     }
 
     // Load a model.
-    let mut net: Net = opencv::dnn::read_net(modelPath, configPath, parser.get_str_def("framework")?.as_str())?;
+    let mut net: Net = dnn::read_net(&model, &config, &framework)?;
     let backend = parser.get_i32_def("backend")?;
     net.set_preferable_backend(backend);
     net.set_preferable_target(parser.get_i32_def("target")?);
     let outNames: core::Vector<String> = net.get_unconnected_out_layers_names()?;
 
-
     // Create a window
     const kWinName: &str = "Deep learning object detection in OpenCV";
     highgui::named_window(kWinName, highgui::WINDOW_NORMAL);
-    let mut initialConf: Option<&mut i32> = Some (&mut ((confThreshold as i32) * 100));
+    let initialConf: Option<&mut i32> = Some (&mut ((confThreshold as i32) * 100));
 
     highgui::create_trackbar("Confidence threshold, %", kWinName, initialConf, 99, Some(Box::new(cb)));
 
@@ -380,63 +376,29 @@ fn main() -> Result<()> {
         cap.open_def(parser.get_i32_def("device")?);
     }
 
-    // ===================================
-    // no threads version
-    // if (asyncNumReq){
-    //   Err(Error::new(StsNotImplemented, "Asynchronous forward is supported only with Inference Engine backend."));
-    // }
+    let process: Arc<AtomicBool> = Arc::new(AtomicBool::new(true));
 
-    // // Process frames
-    // let mut frame: Mat = Mat::default();
-    // let blob: Mat  = Mat::default();
-
-    // while (highgui::wait_key_ex(1)? < 0)
-    // {
-    //     if !cap.read(&mut frame)? {
-    //         println!("Can't grab frame! Stop");
-    //         break;
-    //     }
-    //     if frame.size()?.width == 0 {
-    //         highgui::wait_key_def();
-    //         break;
-    //     }
-
-    //     preprocess(&mut frame, net, Size::new(inpWidth, inpHeight), scale, mean, swapRB);
-
-    //     let outs: Vec<Mat> = Vec::new();
-    //     net.forward(outs, outNames);
-
-    //     postprocess(&frame, &outs, net, backend);
-
-    //     // Put efficiency information.
-    //     let layersTimes:Vec<f64> = Vec::new();
-    //     let freq: f64 = get_tick_frequency() / 1000;
-    //     let t: f64 = net.getPerfProfile(layersTimes) / freq;
-    //     let label = format!("Inference time: %.2f ms", t);
-    //     imgproc::put_text_def(&mut frame, &label, Point::new(0, 15), FONT_HERSHEY_SIMPLEX, 0.5, core::Scalar(0, 255, 0));
-
-    //     highgui::imshow(kWinName, &frame);
-    // }
-
-    //========================
-    // threads version? probably should be default
-    let mut process: bool = true;
     let fq: QueueFPS<Mat> = QueueFPS::new();
     let framesQueue = Arc::new(Mutex::new(fq));
 
     // Frames capturing thread
     let framesQueue1 = framesQueue.clone();
+    let processFrames = Arc::clone(&process);
     let framesThread = thread::spawn(move || loop {
-        let framesQueue1 = framesQueue1.lock().unwrap();
-        let frame: Mat;
-        while process {
-            if !cap.read(&mut frame).unwrap() {
-              break;
-            }
-            if frame.size().unwrap().width != 0 {
-              framesQueue1.push(&frame);
-            } else {
-              break;
+        let mut framesQueue1 = framesQueue1.lock().unwrap();
+        let mut frame: Mat = Mat::default();
+
+        while processFrames.load(Ordering::Relaxed) {
+            match cap.read(&mut frame) {
+              Ok(false) => break,
+              Ok(_) => {
+                match frame.size() {
+                  Ok(s) if s.width != 0 =>
+                    framesQueue1.push(&frame),
+                  _ => break,
+                }
+              },
+              Err(_) => break,
             }
         }
     });
@@ -450,15 +412,14 @@ fn main() -> Result<()> {
     let framesQueue2 = framesQueue.clone();
     let processedFramesQueue2 = processedFramesQueue.clone();
     let predictionsQueue2 = predictionsQueue.clone();
+    let processProcess = process.clone();
     let processingThread = thread::spawn(move || loop {
-        let framesQueue2 = framesQueue2.lock().unwrap();
-
-        let futureOutputs: VecDeque<core::AsyncArray> = VecDeque::new();
-        let blob: Mat;
-        while process
-        {
+        let mut framesQueue2 = framesQueue2.lock().unwrap();
+        let mut futureOutputs: VecDeque<core::AsyncArray> = VecDeque::new();
+        let blob: Mat = Mat::default();
+        while processProcess.load(Ordering::Relaxed){
             // Get a next frame
-            let frame: Mat = Mat::default();
+            let mut frame: Mat = Mat::default();
             {
                 if !framesQueue2.is_empty() {
                     frame = framesQueue2.get();
@@ -474,7 +435,7 @@ fn main() -> Result<()> {
             }
 
             // Process the frame
-            let predictionsQueue2 = predictionsQueue2.lock().unwrap();
+            let mut predictionsQueue2 = predictionsQueue2.lock().unwrap();
             if !frame.empty() {
                 preprocess(&mut frame, &mut net, Size::new(inpWidth, inpHeight), scale.into(), mean, swapRB);
                 processedFramesQueue2.lock().unwrap().push(&frame);
@@ -485,7 +446,7 @@ fn main() -> Result<()> {
                 }
                 else
                 {
-                    let outs: core::Vector<Mat> = Vec::new().into();
+                    let mut outs: core::Vector<Mat> = Vec::new().into();
                     net.forward(&mut outs, &outNames);
                     predictionsQueue2.push(&outs);
                 }
@@ -493,9 +454,9 @@ fn main() -> Result<()> {
 
             while !futureOutputs.is_empty() &&
                    futureOutputs.front().unwrap().wait_for(0).unwrap() {
-                let async_out: &core::AsyncArray = futureOutputs.front().unwrap();
-                futureOutputs.pop_front();
-                let out: Mat;
+                let async_out: core::AsyncArray = futureOutputs.pop_front().unwrap();
+
+                let mut out: Mat = Mat::default();
                 async_out.get(&mut out);
                 predictionsQueue2.push(&core::Vector::from(vec![out]));
             }
@@ -504,15 +465,15 @@ fn main() -> Result<()> {
 
     // Postprocessing and rendering loop
     while highgui::wait_key_ex(1)? < 0 {
-        let predictionsQueue = predictionsQueue.lock().unwrap();
+        let mut predictionsQueue = predictionsQueue.lock().unwrap();
         let mut framesQueue = framesQueue.lock().unwrap();
-        let processedFramesQueue = processedFramesQueue.lock().unwrap();
+        let mut processedFramesQueue = processedFramesQueue.lock().unwrap();
          if predictionsQueue.is_empty() {
           continue;
         }
 
         let outs:Vec<Mat> = predictionsQueue.get().into();
-        let frame: Mat = processedFramesQueue.get();
+        let mut frame: Mat = processedFramesQueue.get();
 
         postprocess(&mut frame, &outs, &net, backend, confThreshold as f32, &mut classes, nmsThreshold);
 
@@ -530,7 +491,7 @@ fn main() -> Result<()> {
         highgui::imshow(kWinName, &frame);
     }
 
-    process = false;
+    process.store(false, Ordering::Relaxed);
     framesThread.join();
     processingThread.join();
 

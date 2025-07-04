@@ -384,22 +384,22 @@ fn main() -> Result<()> {
     let process: Arc<AtomicBool> = Arc::new(AtomicBool::new(true));
 
     let fq: QueueFPS<Mat> = QueueFPS::new();
-    let framesQueue = Arc::new(Mutex::new(fq));
+    let frames_queue = Arc::new(Mutex::new(fq));
 
     // Frames capturing thread
-    let framesQueue1 = framesQueue.clone();
-    let processFrames = Arc::clone(&process);
+    let frames_queue1 = frames_queue.clone();
+    let process_frames = Arc::clone(&process);
     let framesThread = thread::spawn(move || loop {
-        let mut framesQueue1 = framesQueue1.lock().unwrap();
+        let mut frames_queue1 = frames_queue1.lock().unwrap();
         let mut frame: Mat = Mat::default();
 
-        while processFrames.load(Ordering::Relaxed) {
+        while process_frames.load(Ordering::Relaxed) {
             match cap.read(&mut frame) {
               Ok(false) => break,
               Ok(_) => {
                 match frame.size() {
                   Ok(s) if s.width != 0 =>
-                    framesQueue1.push(&frame),
+                    frames_queue1.push(&frame),
                   _ => break,
                 }
               },
@@ -409,94 +409,94 @@ fn main() -> Result<()> {
     });
 
     let pfq: QueueFPS<Mat> = QueueFPS::new();
-    let processedFramesQueue = Arc::new(Mutex::new(pfq));
+    let processedframes_queue = Arc::new(Mutex::new(pfq));
     let pdq: QueueFPS<core::Vector<Mat>> = QueueFPS::new();
-    let predictionsQueue = Arc::new(Mutex::new(pdq));
+    let predictions_queue = Arc::new(Mutex::new(pdq));
 
     // Frames processing thread
-    let framesQueue2 = framesQueue.clone();
-    let processedFramesQueue2 = processedFramesQueue.clone();
-    let predictionsQueue2 = predictionsQueue.clone();
-    let processProcess = process.clone();
+    let frames_queue2 = frames_queue.clone();
+    let processedframes_queue2 = processedframes_queue.clone();
+    let predictions_queue2 = predictions_queue.clone();
+    let process_p = process.clone();
 
-    let netA = Arc::new(Mutex::new(net));
-    let netB = netA.clone();
-    let processingThread = thread::spawn(move || loop {
-        let mut framesQueue2 = framesQueue2.lock().unwrap();
-        let mut futureOutputs: VecDeque<core::AsyncArray> = VecDeque::new();
+    let net_a = Arc::new(Mutex::new(net));
+    let net_b = net_a.clone();
+    let processing_thread = thread::spawn(move || loop {
+        let mut frames_queue2 = frames_queue2.lock().unwrap();
+        let mut future_outputs: VecDeque<core::AsyncArray> = VecDeque::new();
         let blob: Mat = Mat::default();
-        while processProcess.load(Ordering::Relaxed){
+        while process_p.load(Ordering::Relaxed){
             // Get a next frame
             let mut frame: Mat = Mat::default();
             {
-                if !framesQueue2.is_empty() {
-                    frame = framesQueue2.get();
+                if !frames_queue2.is_empty() {
+                    frame = frames_queue2.get();
                     if asyncNumReq != 0 {
-                        if futureOutputs.len() == asyncNumReq {
+                        if future_outputs.len() == asyncNumReq {
                           frame = Mat::default();
                         }
                     }
                     else {
-                      framesQueue2.clear();  // Skip the rest of frames
+                      frames_queue2.clear();  // Skip the rest of frames
                     }
                 }
             }
 
             // Process the frame
-            let mut predictionsQueue2 = predictionsQueue2.lock().unwrap();
+            let mut predictions_queue2 = predictions_queue2.lock().unwrap();
             if !frame.empty() {
-                let mut ne = netB.lock().unwrap();
+                let mut ne = net_b.lock().unwrap();
                 let _ = preprocess(&mut frame, &mut ne, Size::new(inpWidth, inpHeight), scale.into(), mean, swapRB);
-                processedFramesQueue2.lock().unwrap().push(&frame);
+                processedframes_queue2.lock().unwrap().push(&frame);
 
                 if asyncNumReq != 0
                 {
-                    futureOutputs.push_back(ne.forward_async_def().unwrap());
+                    future_outputs.push_back(ne.forward_async_def().unwrap());
                 }
                 else
                 {
                     let mut outs: core::Vector<Mat> = Vec::new().into();
                     let _ = ne.forward(&mut outs, &outNames);
-                    predictionsQueue2.push(&outs);
+                    predictions_queue2.push(&outs);
                 }
             }
 
-            while !futureOutputs.is_empty() &&
-                   futureOutputs.front().unwrap().wait_for(0).unwrap() {
-                let async_out: core::AsyncArray = futureOutputs.pop_front().unwrap();
+            while !future_outputs.is_empty() &&
+                   future_outputs.front().unwrap().wait_for(0).unwrap() {
+                let async_out: core::AsyncArray = future_outputs.pop_front().unwrap();
 
                 let mut out: Mat = Mat::default();
                 let _ = async_out.get(&mut out);
-                predictionsQueue2.push(&core::Vector::from(vec![out]));
+                predictions_queue2.push(&core::Vector::from(vec![out]));
             }
         }
     });
 
     // Postprocessing and rendering loop
     
-    let netAA = netA.clone();
+    let net_aa = net_a.clone();
     while highgui::wait_key_ex(1)? < 0 {
-        let mut predictionsQueue = predictionsQueue.lock().unwrap();
-        let mut framesQueue = framesQueue.lock().unwrap();
-        let mut processedFramesQueue = processedFramesQueue.lock().unwrap();
-         if predictionsQueue.is_empty() {
+        let mut predictions_queue = predictions_queue.lock().unwrap();
+        let mut frames_queue = frames_queue.lock().unwrap();
+        let mut processedframes_queue = processedframes_queue.lock().unwrap();
+         if predictions_queue.is_empty() {
           continue;
         }
 
-        let outs:Vec<Mat> = predictionsQueue.get().into();
-        let mut frame: Mat = processedFramesQueue.get();
-        let ne = netAA.lock().unwrap();
+        let outs:Vec<Mat> = predictions_queue.get().into();
+        let mut frame: Mat = processedframes_queue.get();
+        let ne = net_aa.lock().unwrap();
         let _ = postprocess(&mut frame, &outs, &ne, backend, confThreshold as f32, &mut classes, nmsThreshold);
 
-        if predictionsQueue.counter.get() > 1
+        if predictions_queue.counter.get() > 1
         {
-            let label = format!("Camera: {:.2} FPS", framesQueue.getFPS());
+            let label = format!("Camera: {:.2} FPS", frames_queue.getFPS());
             let _ = imgproc::put_text_def(&mut frame, &label, Point::new(0, 15), FONT_HERSHEY_SIMPLEX, 0.5, core::Scalar::new(0., 0., 255., 0.));
 
-            let label = format!("Network: {:.2} FPS", predictionsQueue.getFPS());
+            let label = format!("Network: {:.2} FPS", predictions_queue.getFPS());
             let _ = imgproc::put_text_def(&mut frame, &label, Point::new(0, 30), FONT_HERSHEY_SIMPLEX, 0.5, core::Scalar::new(0., 0., 255., 0.));
 
-            let label = format!("Skipped frames: {:?}", framesQueue.counter.get() - predictionsQueue.counter.get());
+            let label = format!("Skipped frames: {:?}", frames_queue.counter.get() - predictions_queue.counter.get());
             let _ = imgproc::put_text_def(&mut frame, &label, Point::new(0, 45), FONT_HERSHEY_SIMPLEX, 0.5, core::Scalar::new(0., 0., 255., 0.));
         }
         let _ = highgui::imshow(kWinName, &frame);
@@ -504,7 +504,7 @@ fn main() -> Result<()> {
 
     process.store(false, Ordering::Relaxed);
     let _ = framesThread.join();
-    let _ = processingThread.join();
+    let _ = processing_thread.join();
 
     Ok(())
   } else {

@@ -345,7 +345,7 @@ fn main() -> Result<()> {
             };
             Ok(())
           },
-          Err(e) => Err(Error::new(StsError, "File ".to_owned() + &file + " not found")),
+          Err(_e) => Err(Error::new(StsError, "File ".to_owned() + &file + " not found")),
         };
         let _ = css?;
     }

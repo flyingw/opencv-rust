@@ -13,8 +13,8 @@ use std::fs::File;
 use std::io::{BufReader,BufRead};
 use std::collections::{VecDeque, BTreeMap};
 use std::thread;
-use std::cell::Cell;
-use std::sync::{Arc,Mutex};
+use std::cell::{Cell};
+use std::sync::{Arc,Mutex, RwLock};
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
@@ -316,8 +316,8 @@ fn main() -> Result<()> {
     return Ok(());
   }
 
-  let mut conf_threshold = Cell::new(parser.get_f64_def("thr")?);
-
+  let conf_threshold = Arc::new(RwLock::new(parser.get_f64_def("thr")?));
+  
   let nms_threshold = parser.get_f64_def("nms")?  as f32;
   let scale = parser.get_f64_def("scale")? as f32;
   //: "104, 117, 123",
@@ -329,11 +329,6 @@ fn main() -> Result<()> {
   let inp_height = parser.get_i32_def("height")?;
   let async_num_req = parser.get_i32_def("async")? as usize;
   let mut classes: Vec<String> = Vec::new();
-
-  //type Callback = Box<(dyn FnMut(i32)+ Send + Sync + 'static)>;
-  // let cb = |pos: i32| -> () { 
-  //   conf_threshold = (pos as f64) * 0.01;
-  // };
 
   if parser.has("model")? {
     let model = parser.get_str_def("model")?;
@@ -367,13 +362,16 @@ fn main() -> Result<()> {
     // Create a window
     const K_WIN_NAME: &str = "Deep learning object detection in OpenCV";
     let _ = highgui::named_window(K_WIN_NAME, highgui::WINDOW_NORMAL);
-    let mut th100: i32 = (conf_threshold as i32) * 100;
+    let cf2 = Arc::clone(&conf_threshold);
+    let t = conf_threshold.read().unwrap();
+    let mut th100: i32 = (*t as i32) * 100;
     let initial_conf: Option<&mut i32> = Some(&mut th100);
 
     let _ = highgui::create_trackbar("Confidence threshold, %", 
       K_WIN_NAME, initial_conf, 99, Some(Box::new({
         move |pos| {
-          conf_threshold.set((pos as f64) * 0.01);
+          let mut t = cf2.write().unwrap();
+          *t = (pos as f64) * 0.01;
         }
       })));
 
@@ -493,7 +491,8 @@ fn main() -> Result<()> {
         let outs:Vec<Mat> = predictions_queue.get().into();
         let mut frame: Mat = processedframes_queue.get();
         let ne = net_aa.lock().unwrap();
-        let _ = postprocess(&mut frame, &outs, &ne, backend, conf_threshold as f32, &mut classes, nms_threshold);
+        let t = conf_threshold.read().unwrap();
+        let _ = postprocess(&mut frame, &outs, &ne, backend, *t as f32, &mut classes, nms_threshold);
 
         if predictions_queue.counter.get() > 1
         {

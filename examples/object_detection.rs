@@ -93,15 +93,18 @@ fn draw_pred(label: &str, left: i32, mut top: i32, width: i32, height: i32, fram
 
 
 //fn preprocess(const Mat& frame, Net& net, Size inp_size, float scale, const Scalar& mean, bool swap_rb);
-fn preprocess(frame: &mut Mat, net: &mut Net, mut inp_size: core::Size, scale: f64, mean: core::Scalar, swap_rb: bool) -> Result<(), opencv::Error> {
-    let blob: &mut Mat = &mut Mat::default();
+fn preprocess(blob: &mut Mat, 
+              frame: &mut Mat,
+              net: &mut Net,
+              mut inp_size: core::Size, 
+              scale: f64, 
+              mean: core::Scalar, 
+              swap_rb: bool) -> Result<(), opencv::Error> {
     // Create a 4D blob from a frame.
     if inp_size.width <= 0 { inp_size.width = frame.cols();}
     if inp_size.height <= 0 { inp_size.height = frame.rows();}
     
     let _ = opencv::dnn::blob_from_image_to(frame, blob, 1.0, inp_size, core::Scalar::default(), swap_rb, false, CV_8U);
-
-    //blobFromImage(frame, blob, 1.0, inp_size, Scalar(), swap_rb, false, CV_8U);
 
     // Run a model.
     let _ = net.set_input(blob, "", scale, mean);
@@ -285,14 +288,22 @@ fn main() -> Result<()> {
   let parser = CommandLineParser::new(
     &args,
     concat!(
-      "{help  h           |            | Print this message}",      
-      "{ device      |  0 | camera device number. }",
-      "{ input i     | | Path to input image or video file. Skip this argument to capture frames from a camera. }",
-      "{ framework f | | Optional name of an origin framework of the model. Detect it automatically if it does not set. }",
-      "{ classes     | | Optional path to a text file with names of classes to label detected objects. }",
-      "{ thr         | .5 | Confidence threshold. }",
-      "{ nms         | .4 | Non-maximum suppression threshold. }",
-      "{ backend     |  0 | Choose one of computation backends: 
+      "{ help  h     |     | Print this message}",      
+      "{ device      | 0   | camera device number. }",
+      "{ input i     |     | Path to input image or video file. Skip this argument to capture frames from a camera. }",
+      "{ scale sc    | 1.0 | Scale factor used to resize input video frames}",
+      //"{ scale       | 1.0 1.0 1.0 | Preprocess input image by multiplying on a scale factor. }",
+      "{ rgb         | 1   | Indicate that model works with RGB input images instead BGR ones. }",
+      "{ nc          | 80 | Number of classes. Default is 80 (coming from COCO dataset). }",
+      "{ framework f |     | Optional name of an origin framework of the model. Detect it automatically if it does not set. }",
+      "{ classes     |     | Optional path to a text file with names of classes to label detected objects. }",
+      "{ thr         | .5  | Confidence threshold. }",
+      "{ nms         | .4  | Non-maximum suppression threshold. }",
+      "{ mean        | 0.0 0.0 0.0 | Normalization constant. }",
+      "{ width       | 640 | Preprocess input image by resizing to a specific width. }",
+      "{ height      | 640 | Preprocess input image by resizing to a specific height. }",
+      "{ config c    | | Path to the model configuration file. }",
+      "{ backend     |  0  | Choose one of computation backends: 
                          0: automatically (by default),
                          1: Halide language (http://halide-lang.org/), 
                          2: Intel's Deep Learning Inference Engine (https://software.intel.com/openvino-toolkit), 
@@ -308,8 +319,25 @@ fn main() -> Result<()> {
                          6: CUDA, 
                          7: CUDA fp16 (half-float preprocess) }",
       "{ async       | 0 | Number of asynchronous forwards at the same time.
-                        Choose 0 for synchronous mode }"),
+                        Choose 0 for synchronous mode }",
+      "{classes | object_detection_classes_yolo.txt}",
+      "{model | yolov8x.onnx | Model?}"),
   )?;
+
+
+// yolov8x:
+//   load_info:
+//     url: "https://huggingface.co/cabelo/yolov8/resolve/main/yolov8x.onnx?download=true"
+//     sha1: "462f15d668c046d38e27d3df01fe8142dd004cb4"
+//   model: "yolov8x.onnx"
+//   mean: 0.0
+//   scale: 0.00392
+//   width: 640
+//   height: 640
+//   rgb: true
+//   classes: "object_detection_classes_yolo.txt"
+//   background_label_id: 0
+//   sample: "yolo_detector"
 
   if parser.has("help")? {
     parser.print_message()?;
@@ -319,10 +347,9 @@ fn main() -> Result<()> {
   let conf_threshold = Arc::new(RwLock::new(parser.get_f64_def("thr")?));
   
   let nms_threshold = parser.get_f64_def("nms")?  as f32;
-  let scale = parser.get_f64_def("scale")? as f32;
-  //: "104, 117, 123",
+  let scale = parser.get_f64_def("scale")? as f32; //parser.get<Scalar>("scale");
   //let mean: core::Scalar = parser.get_scalar("mean", true)?;
-  let _mean = parser.get_str_def("mean")?;
+  //let _mean = parser.get_str_def("mean")?;
   let mean: core::Scalar = core::Scalar::new(0., 0., 0., 0.);
   let swap_rb = parser.get_bool_def("rgb")?;
   let inp_width = parser.get_i32_def("width")?;
@@ -429,7 +456,7 @@ fn main() -> Result<()> {
     let processing_thread = thread::spawn(move || loop {
         let mut frames_queue2 = frames_queue2.lock().unwrap();
         let mut future_outputs: VecDeque<core::AsyncArray> = VecDeque::new();
-        let blob: Mat = Mat::default();
+        let mut blob: &mut Mat = &mut Mat::default();
         while process_p.load(Ordering::Relaxed){
             // Get a next frame
             let mut frame: Mat = Mat::default();
@@ -451,7 +478,7 @@ fn main() -> Result<()> {
             let mut predictions_queue2 = predictions_queue2.lock().unwrap();
             if !frame.empty() {
                 let mut ne = net_b.lock().unwrap();
-                let _ = preprocess(&mut frame, &mut ne, Size::new(inp_width, inp_height), scale.into(), mean, swap_rb);
+                let _ = preprocess(&mut blob, &mut frame, &mut ne, Size::new(inp_width, inp_height), scale.into(), mean, swap_rb);
                 processedframes_queue2.lock().unwrap().push(&frame);
 
                 if async_num_req != 0

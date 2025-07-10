@@ -1,14 +1,13 @@
 use std::env;
 
 use opencv::core::{CommandLineParser, Point, Rect, Rect2i, Size, StsNotImplemented, StsError, TickMeter};
-//use opencv::objdetect::{FaceRecognizerSF, FaceRecognizerSF_DisType};
 use opencv::prelude::*;
 use opencv::{core, dnn, highgui, imgproc, videoio, Error, Result};
 use opencv::core::{CV_8U, min_max_loc, Vector};
 use opencv::imgproc::{FONT_HERSHEY_SIMPLEX};
 use opencv::dnn::{Net,DNN_BACKEND_OPENCV};
 use opencv::boxed_ref::{BoxedRef};
-use videoio::{CAP_FFMPEG,CAP_GSTREAMER};
+//use videoio::{CAP_FFMPEG,CAP_GSTREAMER};
 use std::cmp::max;
 use std::collections::{VecDeque, BTreeMap};
 use std::thread;
@@ -28,10 +27,6 @@ impl <T> QueueFPS<T> {
       q: VecDeque::<T>::new(),
       counter: 0,
     }
-  }
-
-  pub fn get_fps(&self, tm: &TickMeter) -> f64 {
-    self.counter as f64 / tm.get_time_sec().unwrap()
   }
 }
 
@@ -104,6 +99,7 @@ fn postprocess(frame: &mut Mat,
     let mut confidences: Vec<f32> = Vec::new();
     let mut boxes: Vec<Rect> = Vec::new();
     if out_layer_type == "DetectionOutput" {
+      
         // Network produces output blob with a shape 1x1xNx7 where N is a number of
         // detections and an every detection is a vector of values
         // [batchId, class_id, confidence, left, top, right, bottom]
@@ -174,6 +170,7 @@ fn postprocess(frame: &mut Mat,
         }
 
     }  else {
+
       return Err(Error::new(StsNotImplemented, "Unknown output layer type: ".to_owned() + &out_layer_type));
     }
 
@@ -206,7 +203,6 @@ fn postprocess(frame: &mut Mat,
           }
 
           let nms_indices: Vec<i32> = Vec::new();
-          //nms_boxes_f64_def
   
           let _ = opencv::dnn::nms_boxes_def(
               &Vector::from_slice(&local_boxes[..]), 
@@ -248,18 +244,17 @@ const KEYS: &str = concat!(
     "{ help  h     |     | Print this message}",
     "{ device      | 0   | camera device number. }",
     "{ input i     |     | Path to input image or video file. Skip this argument to capture frames from a camera. }",
-    "{ scale       | 0.00392 | Scale factor used to resize input video frames}",
+    "{ scale       | 1.0 | Scale factor used to resize input video frames}",
     "{ rgb         | 1   | Indicate that model works with RGB input images instead BGR ones. }",
     "{ framework f |     | Optional name of an origin framework of the model. Detect it automatically if it does not set. }",
     "{ classes     |     | Optional path to a text file with names of classes to label detected objects. }",
 
     "{ thr         | .5  | Confidence threshold. }",
     "{ nms         | .4  | Non-maximum suppression threshold. }",
-    // //"{ mean        | 0.0 0.0 0.0 | Normalization constant. }",
-    "{ width       | 848 | Preprocess input image by resizing to a specific width. }",
-    "{ height      | 464 | Preprocess input image by resizing to a specific height. }",
+    "{ width       | 608 | Preprocess input image by resizing to a specific width. }",
+    "{ height      | 608 | Preprocess input image by resizing to a specific height. }",
     "{ config c    | yolov4.cfg | Path to the model configuration file. }",
-    "{ backend     |  3  | Choose one of computation backends: 
+    "{ backend     |  0  | Choose one of computation backends: 
                         0: automatically (by default),
                         1: Halide language (http://halide-lang.org/), 
                         2: Intel's Deep Learning Inference Engine (https://software.intel.com/openvino-toolkit), 
@@ -306,7 +301,7 @@ fn main() -> Result<()> {
     let _ = net.set_preferable_backend(backend);
     let _ = net.set_preferable_target(parser.get_i32_def("target")?);
     let out_names: core::Vector<String> = net.get_unconnected_out_layers_names()?;
-    let mut cap = videoio::VideoCapture::new(0, CAP_GSTREAMER)?;
+    let mut cap = videoio::VideoCapture::default()?;//videoio::VideoCapture::new(0, CAP_GSTREAMER)?;
     if parser.has("input")? {
         let input = parser.get_str_def("input")?; //core::find_file_def(&file)?;
         let pipe = format!("filesrc location={input} ! decodebin ! videoconvert ! videoscale ! appsink");
@@ -321,16 +316,13 @@ fn main() -> Result<()> {
 
     highgui::named_window_def("obj detection")?;
 
-    let fq: QueueFPS<Mat> = QueueFPS::new();
+    let fq = Arc::new(RwLock::new(QueueFPS::<Mat>::new()));
     let fqtm = TickMeter::default().map(|t| Arc::new(Mutex::new(t)))?;
-    let frames_queue = Arc::new(RwLock::new(fq));
     
-    let fque = frames_queue.clone();
-    let fqtm2 = fqtm.clone();
-    let frames_thread = thread::spawn({
-      println!("start reading frames");
-      move || loop {
-        let _ = fque.write()
+    let ffq = fq.clone();
+    let f_fqtm = fqtm.clone();
+    let frames = thread::spawn(move || loop {
+        let _ = ffq.write()
           .map_err(|_| Error::new(StsError, "can't write to frames queue"))
           .and_then(|mut q| {
             let mut frame: Mat = Mat::default();
@@ -340,12 +332,14 @@ fn main() -> Result<()> {
                 .filter(|x| identity(*x))
                 .filter(|_| frame.size().ok().is_some_and(|s| s.width != 0))
                 .map(|_| {
-                  println!("read frame and push it back");
                   q.q.push_back(frame);
                   q.counter = q.counter + 1;
                   if q.counter > 1 {
-                    let _ = fqtm2.lock().unwrap().reset();
-                    let _ = fqtm2.lock().unwrap().start();
+                    let _ = f_fqtm.lock().and_then(|mut tm| {
+                      let _ = tm.reset();
+                      let _ = tm.start();
+                      Ok(())
+                    });
                   }
                   drop(q);
                   thread::sleep(Duration::from_millis(10));
@@ -353,80 +347,62 @@ fn main() -> Result<()> {
                 .ok_or(Error::new(StsError, "can't read frame"))
         });
       }
-    });
+    );
 
-    let pfq: QueueFPS<Mat> = QueueFPS::new();
-    let processedframes_queue = Arc::new(RwLock::new(pfq));
-    let pdq: QueueFPS<core::Vector<Mat>> = QueueFPS::new();
+    let pfq = Arc::new(RwLock::new(QueueFPS::<Mat>::new()));
+    let pdq = Arc::new(RwLock::new(QueueFPS::<core::Vector<Mat>>::new()));
     let pdqtm:Arc<Mutex<TickMeter>> = TickMeter::default().map(|t| Arc::new(Mutex::new(t)))?;
-    let predictions_queue = Arc::new(RwLock::new(pdq));
 
     let net_a = Arc::new(Mutex::new(net));
     let net_b = net_a.clone();
 
-    let frames_queue2 = frames_queue.clone();
-    let processedframes_queue2 = processedframes_queue.clone();
-    let predictions_queue2 = predictions_queue.clone();
-    let pdqtm2 = pdqtm.clone();
+    let fpq = fq.clone();
+    let p_pfq = pfq.clone();
+    let p_pdq = pdq.clone();
+    let p_pdqtm = pdqtm.clone();
 
-    let processing_thread = thread::spawn(move || loop {
+    let processing = thread::spawn(move || loop {
         let mut blob: &mut Mat = &mut Mat::default();
-        let p = frames_queue2.write()
+        let p = fpq.write()
           .map_err(|_| Error::new(StsError, "can't access frames queue"))
           .and_then(|mut q| {
-            // pop front may not be possible
             match q.q.pop_front() {
               Some(mut frame) if !frame.empty() => {
                 drop(q);
-                println!("proc front frame ");
                 let mut ne = net_b.lock().unwrap();
                 let _ = preprocess(&mut blob, &mut frame, &mut ne, Size::new(inp_width, inp_height), scale.into(), mean, swap_rb);
 
-                println!("preprocessed");
-                let _ = processedframes_queue2.write()
+                let _ = p_pfq.write()
                   .and_then(|mut q| {
-                    println!("write in processed");
                     q.q.push_back(frame);
                     q.counter = q.counter + 1;
                     if q.counter > 1 {
-                      let _ = pdqtm2.lock().unwrap().reset();
-                      let _ = pdqtm2.lock().unwrap().start();
+                      let _ = p_pdqtm.lock().and_then(|mut tm| {
+                        let _ = tm.reset();
+                        let _ = tm.start();
+                        Ok(())
+                      });
                     }
                     Ok(())
                   });
 
-                predictions_queue2
+                p_pdq
                   .write()
                   .map_err(|_| Error::new(StsError, "can't access prediction queue"))
                   .and_then(|mut q| {
-                    println!("handle predictions");
-
                     let mut outs: core::Vector<Mat> = Vec::new().into();
-
-                    match ne.forward(&mut outs, &out_names) {
-                      Ok(_) => {
-                        println!("forward ok");
-                      },
-                      Err(e) => {
-                        println!("forward failed {e}");
-                      },
-                    }
-
+                    let _ = ne.forward(&mut outs, &out_names);
                     q.q.push_back(outs);
                     q.counter = q.counter + 1;
-
                     Ok(())
                   })
               },
-              Some(_) => 
-                Err(Error::new(StsError, "no frames")),
-              None => 
-                Err(Error::new(StsError, "no frames")),
+              _ => Err(Error::new(StsError, "no frames")),
             }
           });
 
         match p {
-          Ok(_) => thread::sleep(Duration::from_millis(10)),
+          Ok(_) => thread::sleep(Duration::from_millis(20)),
           Err(_) => break,
         }
     });
@@ -434,11 +410,11 @@ fn main() -> Result<()> {
     let net_c = net_a.clone();
 
     while highgui::wait_key(1)? < 0 {
-        
-        let _ = predictions_queue.write().and_then(|mut pq| {
+        println!("key?");
+        let _ = pdq.write().and_then(|mut pq| {
           match pq.q.pop_front() {
             Some(outs) => {
-              let _ = processedframes_queue.write()
+              let _ = pfq.write()
                 .and_then(|mut pdq| {
                   match pdq.q.pop_front() {
                     Some(mut frame) => {
@@ -446,16 +422,18 @@ fn main() -> Result<()> {
                       let _ = postprocess(&mut frame, &outs, &ne, backend, conf_threshold as f32, &mut classes, nms_threshold);
 
                       if pdq.counter > 1 {
-                          let _ = frames_queue.read().and_then(|fq| {
+                          let _ = fq.read().and_then(|fq| {
                             let mut fqtm = fqtm.lock().unwrap();
                             let _ = fqtm.stop();
-                            let label = format!("Camera: {:.2} FPS", fq.get_fps(&fqtm));
+                            
+
+                            let label = format!("Camera: {:.2} FPS", fq.counter as f64 / fqtm.get_time_sec().unwrap());
                             let _ = fqtm.start();
                             let _ = imgproc::put_text_def(&mut frame, &label, Point::new(0, 15), FONT_HERSHEY_SIMPLEX, 0.5, core::Scalar::new(0., 0., 255., 0.));
 
                             let mut pdqtm = pdqtm.lock().unwrap();
                             let _ = pdqtm.stop();
-                            let label = format!("Network: {:.2} FPS", pdq.get_fps(&pdqtm));
+                            let label = format!("Network: {:.2} FPS", pdq.counter as f64 / pdqtm.get_time_sec().unwrap());
                             let _ = pdqtm.start();
                             let _ = imgproc::put_text_def(&mut frame, &label, Point::new(0, 30), FONT_HERSHEY_SIMPLEX, 0.5, core::Scalar::new(0., 0., 255., 0.));
 
@@ -471,14 +449,14 @@ fn main() -> Result<()> {
                   }
                 });
             },
-            None => {},
+            None => (),
           };
           Ok(())
         });
     }
-
-    let _ = frames_thread.join();
-    let _ = processing_thread.join();
+    println!("kjks");
+    let _ = frames.join();
+    let _ = processing.join();
     Ok(())
   } else {
     Err(Error::new(StsError, "Cannot find a model"))

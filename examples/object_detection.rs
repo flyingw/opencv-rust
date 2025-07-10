@@ -14,6 +14,7 @@ use std::collections::{VecDeque, BTreeMap};
 use std::thread;
 use std::sync::{Arc,RwLock,Mutex};
 use std::convert::identity;
+use std::time::Duration;
 
 pub struct QueueFPS<T>{
   pub q: VecDeque<T>,
@@ -36,11 +37,6 @@ impl <T> QueueFPS<T> {
   pub fn len(&mut self) -> usize {
     self.q.len()
   } 
-  
-  pub fn pop_front(&mut self) -> Option<T> {
-    self.q.pop_front()
-  }
-
 
   pub fn get_fps(&self, tm: &Arc<Mutex<TickMeter>>) -> f32 {
       // let _ = self.tm.stop();
@@ -348,30 +344,32 @@ fn main() -> Result<()> {
     let fque = frames_queue.clone();
     let fqtm2 = fqtm.clone();
     let frames_thread = thread::spawn({
+      println!("start reading frames");
       move || loop {
         let _ = fque.write()
           .map_err(|_| Error::new(StsError, "can't write to frames queue"))
           .and_then(|mut q| {
             let mut frame: Mat = Mat::default();
-
-          cap.read(&mut frame)
-              .ok()
-              .filter(|x| identity(*x))
-              .filter(|_| frame.size().ok().is_some_and(|s| s.width != 0))
-              .map(|_| {
-                q.q.push_back(frame);
-                q.counter = q.counter + 1;
-                if q.counter > 1 {
-                  let _ = fqtm2.lock().unwrap().reset();
-                  let _ = fqtm2.lock().unwrap().start();
-                }
-              })
-              .ok_or(Error::new(StsError, "can't read frame"))
-
+           
+            cap.read(&mut frame)
+                .ok()
+                .filter(|x| identity(*x))
+                .filter(|_| frame.size().ok().is_some_and(|s| s.width != 0))
+                .map(|_| {
+                  println!("read frame and push it back");
+                  q.q.push_back(frame);
+                  q.counter = q.counter + 1;
+                  if q.counter > 1 {
+                    let _ = fqtm2.lock().unwrap().reset();
+                    let _ = fqtm2.lock().unwrap().start();
+                  }
+                  drop(q);
+                  thread::sleep(Duration::from_millis(10));
+                })
+                .ok_or(Error::new(StsError, "can't read frame"))
         });
-
-    }
-  });
+      }
+    });
 
     let pfq: QueueFPS<Mat> = QueueFPS::new();
     let processedframes_queue = Arc::new(RwLock::new(pfq));
@@ -386,19 +384,24 @@ fn main() -> Result<()> {
     let processedframes_queue2 = processedframes_queue.clone();
     let predictions_queue2 = predictions_queue.clone();
     let pdqtm2 = pdqtm.clone();
-    let processing_thread = thread::spawn(move || {
-        let mut blob: &mut Mat = &mut Mat::default(); // maybe uninir
 
-        frames_queue2.write()
+    let processing_thread = thread::spawn(move || loop {
+        let mut blob: &mut Mat = &mut Mat::default();
+        let p = frames_queue2.write()
           .map_err(|_| Error::new(StsError, "can't access frames queue"))
           .and_then(|mut q| {
-            match q.pop_front() {
+            // pop front may not be possible
+            match q.q.pop_front() {
               Some(mut frame) if !frame.empty() => {
+                drop(q);
+                println!("proc front frame ");
                 let mut ne = net_b.lock().unwrap();
                 let _ = preprocess(&mut blob, &mut frame, &mut ne, Size::new(inp_width, inp_height), scale.into(), mean, swap_rb);
 
+                println!("preprocessed");
                 let _ = processedframes_queue2.write()
                   .and_then(|mut q| {
+                    println!("write in processed");
                     q.q.push_back(frame);
                     q.counter = q.counter + 1;
                     if q.counter > 1 {
@@ -412,6 +415,8 @@ fn main() -> Result<()> {
                   .write()
                   .map_err(|_| Error::new(StsError, "can't access prediction queue"))
                   .and_then(|mut q| {
+                    println!("handle predictions");
+
                     let mut outs: core::Vector<Mat> = Vec::new().into();
 
                     match ne.forward(&mut outs, &out_names) {
@@ -429,10 +434,17 @@ fn main() -> Result<()> {
                     Ok(())
                   })
               },
-              Some(_) => Err(Error::new(StsError, "no frames")),
-              None => Err(Error::new(StsError, "no frames")),
+              Some(_) => 
+                Err(Error::new(StsError, "no frames")),
+              None => 
+                Err(Error::new(StsError, "no frames")),
             }
-          })
+          });
+
+        match p {
+          Ok(_) => thread::sleep(Duration::from_millis(10)),
+          Err(_) => break,
+        }
     });
 
     let net_c = net_a.clone();
@@ -440,14 +452,12 @@ fn main() -> Result<()> {
     while highgui::wait_key(1)? < 0 {
         
         let _ = predictions_queue.write().and_then(|mut pq| {
-          match pq.pop_front() {
+          match pq.q.pop_front() {
             Some(outs) => {
               let _ = processedframes_queue.write()
                 .and_then(|mut pdq| {
-                  match pdq.pop_front() {
+                  match pdq.q.pop_front() {
                     Some(mut frame) => {
-                      //&mut impl ToInputOutputArray
-
                       let ne = net_c.lock().unwrap();
                       let _ = postprocess(&mut frame, &outs, &ne, backend, conf_threshold as f32, &mut classes, nms_threshold);
 

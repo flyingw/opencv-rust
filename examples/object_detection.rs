@@ -30,25 +30,9 @@ impl <T> QueueFPS<T> {
     }
   }
 
-  pub fn is_empty(&mut self) -> bool {
-    self.q.is_empty()
+  pub fn get_fps(&self, tm: &TickMeter) -> f64 {
+    self.counter as f64 / tm.get_time_sec().unwrap()
   }
-
-  pub fn len(&mut self) -> usize {
-    self.q.len()
-  } 
-
-  pub fn get_fps(&self, tm: &Arc<Mutex<TickMeter>>) -> f32 {
-      // let _ = self.tm.stop();
-      let fps: f64  = self.counter  as f64 / tm.lock().unwrap().get_time_sec().unwrap();
-      // let _ = self.tm.start();
-      fps as f32
-  }
-
-  pub fn clear(&mut self) -> () {
-    self.q.clear();
-  }
-
 }
 
 //void draw_pred(int class_id, float conf, int left, int top, int right, int bottom, Mat& frame);
@@ -463,10 +447,16 @@ fn main() -> Result<()> {
 
                       if pdq.counter > 1 {
                           let _ = frames_queue.read().and_then(|fq| {
+                            let mut fqtm = fqtm.lock().unwrap();
+                            let _ = fqtm.stop();
                             let label = format!("Camera: {:.2} FPS", fq.get_fps(&fqtm));
+                            let _ = fqtm.start();
                             let _ = imgproc::put_text_def(&mut frame, &label, Point::new(0, 15), FONT_HERSHEY_SIMPLEX, 0.5, core::Scalar::new(0., 0., 255., 0.));
 
+                            let mut pdqtm = pdqtm.lock().unwrap();
+                            let _ = pdqtm.stop();
                             let label = format!("Network: {:.2} FPS", pdq.get_fps(&pdqtm));
+                            let _ = pdqtm.start();
                             let _ = imgproc::put_text_def(&mut frame, &label, Point::new(0, 30), FONT_HERSHEY_SIMPLEX, 0.5, core::Scalar::new(0., 0., 255., 0.));
 
                             let label = format!("Skipped frames: {:?}", fq.counter - pdq.counter);

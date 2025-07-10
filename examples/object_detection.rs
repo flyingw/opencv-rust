@@ -3,7 +3,7 @@ use std::env;
 use opencv::core::{CommandLineParser, Point, Rect, Rect2i, Size, StsNotImplemented, StsError, TickMeter};
 use opencv::prelude::*;
 use opencv::{core, dnn, highgui, imgproc, videoio, Error, Result};
-use opencv::core::{CV_8U, min_max_loc, Vector};
+use opencv::core::{CV_8U, Vector};
 use opencv::imgproc::{FONT_HERSHEY_SIMPLEX};
 use opencv::dnn::{Net,DNN_BACKEND_OPENCV};
 use opencv::boxed_ref::{BoxedRef};
@@ -99,7 +99,6 @@ fn postprocess(frame: &mut Mat,
     let mut confidences: Vec<f32> = Vec::new();
     let mut boxes: Vec<Rect> = Vec::new();
     if out_layer_type == "DetectionOutput" {
-      
         // Network produces output blob with a shape 1x1xNx7 where N is a number of
         // detections and an every detection is a vector of values
         // [batchId, class_id, confidence, left, top, right, bottom]
@@ -136,32 +135,31 @@ fn postprocess(frame: &mut Mat,
         }
     }
     else if out_layer_type == "Region" {
-
         for out in outs.into_iter() {
           // Network produces output blob with a shape NxC where N is a number of
           // detected objects and C is a number of classes + 4 where the first 4
           // numbers are [center_x, center_y, width, height]
-          let data: &[i32] = out.data_typed::<i32>()?;
+          let data: &[f32] = out.data_typed::<f32>()?;
 
           for row in 0..out.rows() {
-            let m: &[i32] = out.at_row(row)?;
-            let mat: BoxedRef<Mat> = Mat::from_slice(m)?;
-            let range = core::Range::new(5, out.cols())?;
-            let scores:BoxedRef<Mat> = mat.col_range(&range)?;
+            let m: &[f32] = out.at_row::<f32>(row)?;
+            let oc: usize = out.cols() as usize;
+            let scores: BoxedRef<Mat> = Mat::from_slice(&m[5..oc])?;
 
             let mut class_id_point: Point = Point::default();
             let mut confidence = 0. as f64;
             let mut min = 0.;
-            let _ = min_max_loc(&scores, Some(&mut min), Some(&mut confidence), Some(&mut Point::new(0,0)), Some(&mut class_id_point), &Mat::default());
+            let _ = core::min_max_loc(&scores, Some(&mut min), Some(&mut confidence), Some(&mut Point::new(0,0)), Some(&mut class_id_point), &Mat::default());
 
             if confidence > conf_threshold.into() {
-              let center_x: i32 = (data[0] * frame.cols()) as i32;
-              let center_y: i32 = (data[1] * frame.rows()) as i32;
-              let width: i32=  (data[2] * frame.cols()) as i32;
-              let height: i32 = (data[3] * frame.rows()) as i32;
+              let center_x: i32 = (data[0] as i32 * frame.cols()) as i32;
+              let center_y: i32 = (data[1] as i32 * frame.rows()) as i32;
+              let width: i32=  (data[2] as i32 * frame.cols()) as i32;
+              let height: i32 = (data[3] as i32 * frame.rows()) as i32;
               let left: i32 = center_x - width / 2;
               let top: i32 = center_y - height / 2;
 
+              println!("confidence {0}", confidence);
               class_ids.push(class_id_point.x.try_into().unwrap());
               confidences.push(confidence as f32);
               boxes.push(Rect::new(left, top, width, height));
@@ -170,7 +168,6 @@ fn postprocess(frame: &mut Mat,
         }
 
     }  else {
-
       return Err(Error::new(StsNotImplemented, "Unknown output layer type: ".to_owned() + &out_layer_type));
     }
 
@@ -222,6 +219,8 @@ fn postprocess(frame: &mut Mat,
         confidences = nms_confidences;
     }
 
+    println!("boxes? {:?}", boxes.len());
+
     let mut idx = 0;
     while idx < boxes.len() {
       idx+=1;
@@ -234,6 +233,7 @@ fn postprocess(frame: &mut Mat,
         label = classes[class_id].clone() + ": " + &label;
       }
 
+      println!("draw box...{0}", label);
       let _ = draw_pred(label.as_str(), box0.x, box0.y, box0.width, box0.height,frame);
     }
 
@@ -410,7 +410,7 @@ fn main() -> Result<()> {
     let net_c = net_a.clone();
 
     while highgui::wait_key(1)? < 0 {
-        println!("key?");
+        // println!("key?");
         let _ = pdq.write().and_then(|mut pq| {
           match pq.q.pop_front() {
             Some(outs) => {

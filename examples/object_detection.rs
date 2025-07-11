@@ -1,6 +1,6 @@
 use std::env;
 
-use opencv::core::{CommandLineParser, Point, Rect, Rect2i, Size, StsNotImplemented, StsError, TickMeter};
+use opencv::core::{CommandLineParser, Point, Rect, Size, StsNotImplemented, StsError, TickMeter};
 use opencv::prelude::*;
 use opencv::{core, dnn, highgui, imgproc, videoio, Error, Result};
 use opencv::core::{CV_8U, Vector};
@@ -8,7 +8,6 @@ use opencv::imgproc::{FONT_HERSHEY_SIMPLEX};
 use opencv::dnn::{Net,DNN_BACKEND_OPENCV};
 use opencv::boxed_ref::{BoxedRef};
 //use videoio::{CAP_FFMPEG,CAP_GSTREAMER};
-use std::cmp::max;
 use std::collections::{VecDeque, BTreeMap};
 use std::thread;
 use std::sync::{Arc,RwLock,Mutex};
@@ -29,27 +28,6 @@ impl <T> QueueFPS<T> {
     }
   }
 }
-
-//void draw_pred(int class_id, float conf, int left, int top, int right, int bottom, Mat& frame);
-fn draw_pred(label: &str, left: i32, mut top: i32, width: i32, height: i32, frame: &mut Mat) -> Result<(), opencv::Error> {
-    // Draw bounding box
-    let rect = Rect2i::new(top, left, width, height);
-
-    let _ = imgproc::rectangle_def(frame, rect, (0., 255., 0.).into());
-
-    let mut base_line: i32 = 0;
-    let label_size: core::Size = imgproc::get_text_size(label, FONT_HERSHEY_SIMPLEX, 0.5, 1, &mut base_line)?;
-
-    top = max(top, label_size.height);
-
-    let p1 = Point::new(left, top - label_size.height);
-    let p2 = Point::new(left + label_size.width, top + base_line);
-
-    let _ = imgproc::rectangle_points_def(frame, p1, p2, core::Scalar::all(255.));
-
-    imgproc::put_text_def(frame, label, Point::new(left, top), FONT_HERSHEY_SIMPLEX, 0.5, core::Scalar::default())
-}
-
 
 //fn preprocess(const Mat& frame, Net& net, Size inp_size, float scale, const Scalar& mean, bool swap_rb);
 fn preprocess(blob: &mut Mat, 
@@ -90,7 +68,7 @@ fn postprocess(frame: &mut Mat,
                 net: &Net,
                 backend: i32,
                 conf_threshold: f32, 
-                classes: &mut Vec<String>,
+                _classes: &mut Vec<String>,
                 nms_threshold: f32) -> Result<(),Error> {
     let out_layers: Vec<i32> = net.get_unconnected_out_layers()?.into();
     let out_layer_type: String = net.get_layer(out_layers[0])?.typ();
@@ -98,6 +76,7 @@ fn postprocess(frame: &mut Mat,
     let mut class_ids: Vec<usize> = Vec::new();
     let mut confidences: Vec<f32> = Vec::new();
     let mut boxes: Vec<Rect> = Vec::new();
+
     if out_layer_type == "DetectionOutput" {
         // Network produces output blob with a shape 1x1xNx7 where N is a number of
         // detections and an every detection is a vector of values
@@ -119,10 +98,10 @@ fn postprocess(frame: &mut Mat,
                     let mut height: i32 = bottom - top + 1;
                     if width <= 2 || height <= 2
                     {
-                        left   = data[i + 3] as i32 * frame.cols();
-                        top    = data[i + 4] as i32 * frame.rows();
-                        right  = data[i + 5] as i32 * frame.cols();
-                        bottom = data[i + 6] as i32 * frame.rows();
+                        left   = (data[i + 3] * frame.cols() as f32) as i32;
+                        top    = (data[i + 4] * frame.rows() as f32) as i32;
+                        right  = (data[i + 5] * frame.cols() as f32) as i32;
+                        bottom = (data[i + 6] * frame.rows() as f32) as i32;
                         width  = right - left + 1;
                         height = bottom - top + 1;
                     }
@@ -152,17 +131,17 @@ fn postprocess(frame: &mut Mat,
             let _ = core::min_max_loc(&scores, Some(&mut min), Some(&mut confidence), Some(&mut Point::new(0,0)), Some(&mut class_id_point), &Mat::default());
 
             if confidence > conf_threshold.into() {
-              let center_x: i32 = (data[0] as i32 * frame.cols()) as i32;
-              let center_y: i32 = (data[1] as i32 * frame.rows()) as i32;
-              let width: i32=  (data[2] as i32 * frame.cols()) as i32;
-              let height: i32 = (data[3] as i32 * frame.rows()) as i32;
+              let c: f32= 100.; // magic number,// all the data is kind of 0.00
+              let center_x: i32 = (data[0] * frame.cols() as f32 * c) as i32;
+              let center_y: i32 = (data[1] * frame.rows() as f32 * c) as i32;
+              let width: i32 = (data[2] * frame.cols() as f32 * c) as i32;
+              let height: i32 = (data[3] * frame.rows() as f32 * c) as i32;
               let left: i32 = center_x - width / 2;
               let top: i32 = center_y - height / 2;
-
-              println!("confidence {0}", confidence);
+              let bo = Rect::new(left, top, width, height);
               class_ids.push(class_id_point.x.try_into().unwrap());
               confidences.push(confidence as f32);
-              boxes.push(Rect::new(left, top, width, height));
+              boxes.push(bo);
             }
           }
         }
@@ -171,71 +150,53 @@ fn postprocess(frame: &mut Mat,
       return Err(Error::new(StsNotImplemented, "Unknown output layer type: ".to_owned() + &out_layer_type));
     }
 
-    // NMS is used inside Region layer only on DNN_BACKEND_OPENCV for another backends we need NMS in sample
-    // or NMS is required if number of outputs > 1
+    // NMS is used inside Region layer only on DNN_BACKEND_OPENCV 
+    //for another backends we need NMS in sample or NMS is required if number of outputs > 1
     if out_layers.len() > 1 || (out_layer_type == "Region" && backend != DNN_BACKEND_OPENCV) {
-        let mut class2indices: BTreeMap<i32, Vec<usize>> = BTreeMap::new();
-  
-        for class in 0..class_ids.len() {
-          if confidences[class] >= conf_threshold {
-            let key: usize = class_ids[class];
-            class2indices.entry(key.try_into().unwrap()).and_modify(|v| v.push(class));
-
-          }
-        }
+        let init: BTreeMap<i32, Vec<usize>> = BTreeMap::from_iter(class_ids.iter().enumerate().map(|(_,c)|(*c as i32, Vec::<usize>::new())));
+        let class_it = class_ids.iter().enumerate().map(|(pos,class)| (*class as i32, pos));
+        let class2indices: BTreeMap<i32, Vec<usize>> = class_it.fold(
+          init, 
+            |mut acc: BTreeMap<i32, Vec<usize>>, (k,class)| {
+              acc.entry(k).and_modify(|v| v.push(class));
+              acc
+          });
 
         let mut nms_boxes : Vec<Rect> = Vec::new();
         let mut nms_confidences: Vec<f32> = Vec::new();
         let mut nmsclass_ids: Vec<usize> = Vec::new();
 
-
-        for (k,v) in class2indices {
-          let mut local_boxes: Vec<Rect> = Vec::new();
-          let mut local_confidences: Vec<f32> = Vec::new();
-          let class_indices: Vec<usize> = v;
-
-          for i in class_indices.into_iter() {
-            local_boxes.push(boxes[i]);
-            local_confidences.push(confidences[i]);
-          }
-
-          let nms_indices: Vec<i32> = Vec::new();
-  
+        for (k, class_indices) in class2indices {
+          let mut nms_indices: Vector<i32> = Vector::new();
+          let (local_boxes, local_confidences) = boxes.iter()
+            .zip(confidences.iter())
+            .enumerate()
+            .filter(|(pos,_)| class_indices.contains(pos))
+            .map(|(_,(x,y))| (*x, *y))
+            .unzip();
+          
           let _ = opencv::dnn::nms_boxes_def(
-              &Vector::from_slice(&local_boxes[..]), 
-              &Vector::from_slice(&local_confidences[..]), 
-              conf_threshold as f32,
-              nms_threshold, 
-              &mut Vector::from_slice(&nms_indices[..]));
+               &local_boxes, 
+               &local_confidences, 
+               conf_threshold as f32,
+               nms_threshold, 
+               &mut nms_indices);
 
           for idx in nms_indices.into_iter() {
-            nms_boxes.push(local_boxes[idx as usize]);
-            nms_confidences.push(local_confidences[idx as usize]);
-            nmsclass_ids.push(k.try_into().unwrap());
+            nms_boxes.push(local_boxes.get(idx as usize)?);
+            nms_confidences.push(local_confidences.get(idx as usize)?);
+            nmsclass_ids.push(k as usize);
           }
         }
+
         boxes = nms_boxes;
         class_ids = nmsclass_ids;
         confidences = nms_confidences;
     }
 
-    println!("boxes? {:?}", boxes.len());
-
-    let mut idx = 0;
-    while idx < boxes.len() {
-      idx+=1;
-      let box0: Rect = boxes[idx];
-      let conf = confidences[idx];
-      let class_id = class_ids[idx];
-
-      let mut label: String = format!("{:.2}", conf);
-      if classes.len() > 0 {
-        label = classes[class_id].clone() + ": " + &label;
-      }
-
-      println!("draw box...{0}", label);
-      let _ = draw_pred(label.as_str(), box0.x, box0.y, box0.width, box0.height,frame);
-    }
+    boxes.into_iter().for_each(|box0| {
+      let _ = imgproc::rectangle_def(frame, box0, (0., 255., 0.).into());
+    });
 
     Ok(())
 }
@@ -402,7 +363,7 @@ fn main() -> Result<()> {
           });
 
         match p {
-          Ok(_) => thread::sleep(Duration::from_millis(20)),
+          Ok(_) => thread::sleep(Duration::from_millis(1)),
           Err(_) => break,
         }
     });
@@ -454,7 +415,7 @@ fn main() -> Result<()> {
           Ok(())
         });
     }
-    println!("kjks");
+
     let _ = frames.join();
     let _ = processing.join();
     Ok(())

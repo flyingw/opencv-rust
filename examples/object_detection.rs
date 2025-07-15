@@ -282,7 +282,7 @@ fn main() -> Result<()> {
     
     let ffq = fq.clone();
     let f_fqtm = fqtm.clone();
-    let frames = thread::spawn(move || loop {
+    let _ = thread::spawn(move || loop {
         let _ = ffq.write()
           .map_err(|_| Error::new(StsError, "can't write to frames queue"))
           .and_then(|mut q| {
@@ -322,7 +322,7 @@ fn main() -> Result<()> {
     let p_pdq = pdq.clone();
     let p_pdqtm = pdqtm.clone();
 
-    let processing = thread::spawn(move || loop {
+    let _ = thread::spawn(move || loop {
         let mut blob: &mut Mat = &mut Mat::default();
         let p = fpq.write()
           .map_err(|_| Error::new(StsError, "can't access frames queue"))
@@ -368,10 +368,8 @@ fn main() -> Result<()> {
         }
     });
 
-    let net_c = net_a.clone();
-
-    while highgui::wait_key(1)? < 0 {
-        // println!("key?");
+    loop {
+        let key = highgui::wait_key(1)?;
         let _ = pdq.write().and_then(|mut pq| {
           match pq.q.pop_front() {
             Some(outs) => {
@@ -379,7 +377,7 @@ fn main() -> Result<()> {
                 .and_then(|mut pdq| {
                   match pdq.q.pop_front() {
                     Some(mut frame) => {
-                      let ne = net_c.lock().unwrap();
+                      let ne = net_a.lock().unwrap();
                       let _ = postprocess(&mut frame, &outs, &ne, backend, conf_threshold as f32, &mut classes, nms_threshold);
 
                       if pdq.counter > 1 {
@@ -414,10 +412,11 @@ fn main() -> Result<()> {
           };
           Ok(())
         });
-    }
 
-    let _ = frames.join();
-    let _ = processing.join();
+        if key > 0 {
+          break;
+        }
+    }
     Ok(())
   } else {
     Err(Error::new(StsError, "Cannot find a model"))

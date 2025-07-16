@@ -4,32 +4,17 @@ use opencv::core::{CommandLineParser, Point, Rect, Size, StsNotImplemented, StsE
 use opencv::prelude::*;
 use opencv::{core, dnn, highgui, imgproc, videoio, Error, Result};
 use opencv::core::{CV_8U, Vector};
-use opencv::imgproc::{FONT_HERSHEY_SIMPLEX};
+// use opencv::imgproc::{FONT_HERSHEY_SIMPLEX,COLOR_BGR2RGB};
 use opencv::dnn::{Net,DNN_BACKEND_OPENCV};
 use opencv::boxed_ref::{BoxedRef};
 //use videoio::{CAP_FFMPEG,CAP_GSTREAMER};
 use std::collections::{VecDeque, BTreeMap};
 use std::thread;
 use std::sync::{Arc,RwLock,Mutex};
-use std::convert::identity;
-use std::time::Duration;
+use std::borrow::Cow;
+use std::sync::mpsc;
+use std::ops::DerefMut;
 
-pub struct QueueFPS<T>{
-  pub q: VecDeque<T>,
-  pub counter: u32,
-}
-
-impl <T> QueueFPS<T> {
-
-  pub fn new() -> Self {
-    QueueFPS {
-      q: VecDeque::<T>::new(),
-      counter: 0,
-    }
-  }
-}
-
-//fn preprocess(const Mat& frame, Net& net, Size inp_size, float scale, const Scalar& mean, bool swap_rb);
 fn preprocess(blob: &mut Mat, 
               frame: &mut Mat,
               net: &mut Net,
@@ -40,7 +25,11 @@ fn preprocess(blob: &mut Mat,
     // Create a 4D blob from a frame.
     if inp_size.width <= 0 { inp_size.width = frame.cols();}
     if inp_size.height <= 0 { inp_size.height = frame.rows();}
-    
+
+    // try resize here
+    //let _ = imgproc::cvt_color_def(blob, frame, COLOR_BGR2RGB);
+    //let _ = imgproc::resize_def(blob, frame, core::Size::new(408, 408));
+
     let _ = opencv::dnn::blob_from_image_to(frame, blob, 1.0, inp_size, core::Scalar::default(), swap_rb, false, CV_8U);
 
     // Run a model.
@@ -277,145 +266,129 @@ fn main() -> Result<()> {
 
     highgui::named_window_def("obj detection")?;
 
-    let fq = Arc::new(RwLock::new(QueueFPS::<Mat>::new()));
-    let fqtm = TickMeter::default().map(|t| Arc::new(Mutex::new(t)))?;
-    
-    let ffq = fq.clone();
-    let f_fqtm = fqtm.clone();
-    let _ = thread::spawn(move || loop {
-        let _ = ffq.write()
-          .map_err(|_| Error::new(StsError, "can't write to frames queue"))
-          .and_then(|mut q| {
-            let mut frame: Mat = Mat::default();
-           
-            cap.read(&mut frame)
-                .ok()
-                .filter(|x| identity(*x))
-                .filter(|_| frame.size().ok().is_some_and(|s| s.width != 0))
-                .map(|_| {
-                  q.q.push_back(frame);
-                  q.counter = q.counter + 1;
-                  if q.counter > 1 {
-                    let _ = f_fqtm.lock().and_then(|mut tm| {
-                      let _ = tm.reset();
-                      let _ = tm.start();
-                      Ok(())
-                    });
-                  }
-                  drop(q);
-                  thread::sleep(Duration::from_millis(10));
-                })
-                .ok_or(Error::new(StsError, "can't read frame"))
-        });
-      }
-    );
-
-    let pfq = Arc::new(RwLock::new(QueueFPS::<Mat>::new()));
-    let pdq = Arc::new(RwLock::new(QueueFPS::<core::Vector<Mat>>::new()));
-    let pdqtm:Arc<Mutex<TickMeter>> = TickMeter::default().map(|t| Arc::new(Mutex::new(t)))?;
-
     let net_a = Arc::new(Mutex::new(net));
     let net_b = net_a.clone();
+    let net_c = net_a.clone();
 
-    let fpq = fq.clone();
-    let p_pfq = pfq.clone();
+    type Marc<'a> = Cow<'a, Arc<RwLock<Mat>>>;
+    let qc = VecDeque::<Marc>::new();
+    let aqc = Arc::new(RwLock::new(qc));
+    let raqc = aqc.clone();
+    let paqc = aqc.clone();
+
+    #[derive(Debug)]
+    enum Msg {
+      Ack,
+      Input,
+      Forward,
+    }
+
+    let (tx,rx) = mpsc::channel::<Msg>();
+
+    let pdq = Arc::new(RwLock::new(VecDeque::<core::Vector<Mat>>::new()));
     let p_pdq = pdq.clone();
-    let p_pdqtm = pdqtm.clone();
+
+    let tx = tx.clone();
+    let _ = thread::spawn(move || loop {
+      let mut frame: Mat = Mat::default();
+      let _ = cap.read(&mut frame).ok()
+        .map(|_| {
+          let _ = raqc.write()
+            .and_then(|mut q| {
+              let farc = Arc::new(RwLock::new(frame));
+              let cowf = Cow::Owned(farc);
+
+              q.push_back(cowf);
+
+              let _ = tx.send(Msg::Ack);
+              Ok(())
+            });
+        });
+
+    });
+
+    let (tx0, rx0) = mpsc::channel::<Msg>();
+    let tx01 = tx0.clone();
 
     let _ = thread::spawn(move || loop {
-        let mut blob: &mut Mat = &mut Mat::default();
-        let p = fpq.write()
-          .map_err(|_| Error::new(StsError, "can't access frames queue"))
-          .and_then(|mut q| {
-            match q.q.pop_front() {
-              Some(mut frame) if !frame.empty() => {
-                drop(q);
-                let mut ne = net_b.lock().unwrap();
-                let _ = preprocess(&mut blob, &mut frame, &mut ne, Size::new(inp_width, inp_height), scale.into(), mean, swap_rb);
-
-                let _ = p_pfq.write()
-                  .and_then(|mut q| {
-                    q.q.push_back(frame);
-                    q.counter = q.counter + 1;
-                    if q.counter > 1 {
-                      let _ = p_pdqtm.lock().and_then(|mut tm| {
-                        let _ = tm.reset();
-                        let _ = tm.start();
-                        Ok(())
-                      });
-                    }
-                    Ok(())
-                  });
-
-                p_pdq
-                  .write()
-                  .map_err(|_| Error::new(StsError, "can't access prediction queue"))
-                  .and_then(|mut q| {
-                    let mut outs: core::Vector<Mat> = Vec::new().into();
-                    let _ = ne.forward(&mut outs, &out_names);
-                    q.q.push_back(outs);
-                    q.counter = q.counter + 1;
-                    Ok(())
-                  })
+      match rx.recv() {
+        Ok(Msg::Ack) => {
+          let _ = paqc.write().and_then(|mut q| {
+            match q.back_mut() {
+              Some(lock) => {
+                let _ = lock.write().and_then(|mut frame| {
+                  let mut ne = net_b.lock().unwrap();
+                  let mut blob: &mut Mat = &mut Mat::default();
+                  let _ = preprocess(&mut blob, &mut frame, &mut ne, Size::new(inp_width, inp_height), scale.into(), mean, swap_rb);
+                  let _ = tx01.send(Msg::Input);
+                  Ok(())
+                });
               },
-              _ => Err(Error::new(StsError, "no frames")),
+              None => (),
             }
+            Ok(())
           });
+        },
+        Ok(_) => (),
+        Err(_)  => (), 
+      }
+    });
 
-        match p {
-          Ok(_) => thread::sleep(Duration::from_millis(1)),
-          Err(_) => break,
-        }
+    let (tx1, rx1) = mpsc::channel::<Msg>(); 
+    let tx1 = tx1.clone();
+
+    let rx01 = Arc::new(Mutex::new(rx0));
+    let rx02 = rx01.clone();
+
+    let _ = thread::spawn(move || loop {
+      match rx02.lock().unwrap().recv() {
+        Ok(Msg::Input) => {
+          let mut ne = net_c.lock().unwrap();
+          let mut outs: core::Vector<Mat> = Vec::new().into();
+          let _ = ne.forward(&mut outs, &out_names);
+          
+          let _ = p_pdq.write()
+            .map_err(|_| Error::new(StsError, "can't access prediction queue"))
+            .and_then(|mut q| Ok(q.push_back(outs)) );
+
+          let _ = tx1.send(Msg::Forward);
+        },
+        Ok(_) => (),
+        Err(_) => (),
+      }
+
     });
 
     loop {
-        let key = highgui::wait_key(1)?;
-        let _ = pdq.write().and_then(|mut pq| {
-          match pq.q.pop_front() {
-            Some(outs) => {
-              let _ = pfq.write()
-                .and_then(|mut pdq| {
-                  match pdq.q.pop_front() {
-                    Some(mut frame) => {
-                      let ne = net_a.lock().unwrap();
-                      let _ = postprocess(&mut frame, &outs, &ne, backend, conf_threshold as f32, &mut classes, nms_threshold);
+      let key = highgui::wait_key(1)?;
+      match rx1.try_recv() {
+        Ok(Msg::Forward) => {
+          let _ = aqc.write().and_then(|mut q| {
+            match q.pop_front() {
+              Some(mut cow) => {
+                let mut guard = cow.to_mut().write().unwrap();
+                let f1: &mut Mat = guard.deref_mut();
 
-                      if pdq.counter > 1 {
-                          let _ = fq.read().and_then(|fq| {
-                            let mut fqtm = fqtm.lock().unwrap();
-                            let _ = fqtm.stop();
-                            
+                let outs: core::Vector<Mat> = match pdq.write() {
+                  Ok(mut q) => q.pop_front().unwrap_or(Vec::new().into()),
+                  Err(_) => Vec::new().into(),
+                };
+                let ne = net_a.lock().unwrap();
+                let _ = postprocess(f1, &outs, &ne, backend, conf_threshold as f32, &mut classes, nms_threshold);
+                let _ = highgui::imshow("obj detection", f1);
+              },
+              None => (),
+            }
+            Ok(())
+          });
+        },
+        Ok(_) => (),
+        _ => (),
+      }
 
-                            let label = format!("Camera: {:.2} FPS", fq.counter as f64 / fqtm.get_time_sec().unwrap());
-                            let _ = fqtm.start();
-                            let _ = imgproc::put_text_def(&mut frame, &label, Point::new(0, 15), FONT_HERSHEY_SIMPLEX, 0.5, core::Scalar::new(0., 0., 255., 0.));
-
-                            let mut pdqtm = pdqtm.lock().unwrap();
-                            let _ = pdqtm.stop();
-                            let label = format!("Network: {:.2} FPS", pdq.counter as f64 / pdqtm.get_time_sec().unwrap());
-                            let _ = pdqtm.start();
-                            let _ = imgproc::put_text_def(&mut frame, &label, Point::new(0, 30), FONT_HERSHEY_SIMPLEX, 0.5, core::Scalar::new(0., 0., 255., 0.));
-
-                            let label = format!("Skipped frames: {:?}", fq.counter - pdq.counter);
-                            let _ = imgproc::put_text_def(&mut frame, &label, Point::new(0, 45), FONT_HERSHEY_SIMPLEX, 0.5, core::Scalar::new(0., 0., 255., 0.));
-                            Ok(())
-                          }).map_err(|_| Error::new(StsError, "no frames queue"));
-                      }
-                      let _ = highgui::imshow("obj detection", &frame);
-                      Ok(())
-                    },
-                    None => Ok(()),
-                  }
-                });
-            },
-            None => (),
-          };
-          Ok(())
-        });
-
-        if key > 0 {
-          break;
-        }
+      if key > 0 {
+        break;
+      }
     }
     Ok(())
   } else {
